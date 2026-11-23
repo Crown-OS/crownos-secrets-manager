@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crownos_secretsd::{Caller, SecretsService};
+use crownos_secretsd::{AdminPolicy, Caller, SecretsService};
 use secrecy::SecretSlice;
 use secrets_core::{Binding, Confirm, HttpBinding, SecretKind, SecretName, UseOutcome};
 use secrets_protocol::ProxySessionReply;
@@ -48,7 +48,7 @@ fn add(service: &mut SecretsService, secret: &str, http: Vec<HttpBinding>, now: 
         )
         .unwrap();
     let binding = Binding {
-        agents: vec![AGENT.into()],
+        agents: vec![format!("exe:{AGENT}")],
         confirm: Some(Confirm::Never),
         http,
         ..Binding::default()
@@ -68,8 +68,12 @@ async fn a_session_exports_only_the_ca_certificate_and_ends_with_the_lock() {
         iterations: 1,
         parallelism: 1,
     });
-    let mut service = SecretsService::new(vault, vec![ADMIN.into()], data_directory.clone())
-        .with_upstream_roots(rustls::RootCertStore::empty());
+    let mut service = SecretsService::new(
+        vault,
+        AdminPolicy::trusting(vec![ADMIN.into()]),
+        data_directory.clone(),
+    )
+    .with_upstream_roots(rustls::RootCertStore::empty());
     let now = Instant::now();
     service.init(&admin(), bytes(PASSWORD), now).unwrap();
     let http = HttpBinding {
@@ -138,8 +142,12 @@ async fn default_bindings_need_a_confirmation_and_a_change_ends_sessions() {
         iterations: 1,
         parallelism: 1,
     });
-    let mut service = SecretsService::new(vault, vec![ADMIN.into()], data_directory)
-        .with_upstream_roots(rustls::RootCertStore::empty());
+    let mut service = SecretsService::new(
+        vault,
+        AdminPolicy::trusting(vec![ADMIN.into()]),
+        data_directory,
+    )
+    .with_upstream_roots(rustls::RootCertStore::empty());
     let now = Instant::now();
     service.init(&admin(), bytes(PASSWORD), now).unwrap();
     let http = HttpBinding {
@@ -151,7 +159,7 @@ async fn default_bindings_need_a_confirmation_and_a_change_ends_sessions() {
     };
     add(&mut service, "api", vec![http.clone()], now);
     let default_confirm = Binding {
-        agents: vec![AGENT.into()],
+        agents: vec![format!("exe:{AGENT}")],
         http: vec![http],
         ..Binding::default()
     };

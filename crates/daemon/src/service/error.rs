@@ -17,6 +17,8 @@ pub enum ServiceError {
     UnknownSecret(SecretName),
     #[error(transparent)]
     Invalid(#[from] CoreError),
+    #[error("{0:?} is not an app key such as exe:/usr/bin/program")]
+    InvalidAgent(String),
     #[error("too many calls; try again later")]
     RateLimited,
     #[error("too many open requests; wait until the user answers them")]
@@ -47,7 +49,9 @@ impl From<ServiceError> for RemoteError {
             ServiceError::Unavailable => error_code::UNAVAILABLE,
             ServiceError::Locked => error_code::LOCKED,
             ServiceError::UnknownSecret(_) => error_code::UNKNOWN_SECRET,
-            ServiceError::Invalid(_) | ServiceError::Transfer(_) => error_code::INVALID_ARGUMENT,
+            ServiceError::Invalid(_)
+            | ServiceError::InvalidAgent(_)
+            | ServiceError::Transfer(_) => error_code::INVALID_ARGUMENT,
             ServiceError::RateLimited | ServiceError::TooManyRequests => error_code::RATE_LIMITED,
             ServiceError::Vault(_) | ServiceError::Proxy(_) | ServiceError::Sandbox(_) => {
                 error_code::VAULT

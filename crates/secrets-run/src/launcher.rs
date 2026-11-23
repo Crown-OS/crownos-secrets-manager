@@ -9,21 +9,64 @@ use tokio::process::Command;
 
 use crate::SandboxError;
 
-/// The programs that start a run.
+/// Tests that start runs need a private user manager; this variable names its runtime
+/// directory. Without it, such tests skip, so they never touch the session's user manager.
+pub const TEST_USER_RUNTIME_VARIABLE: &str = "CROWNOS_SECRETS_TEST_USER_RUNTIME";
+
+/// The programs that start a run, and the runtime directory of the user manager that runs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launcher {
     pub systemd_run: PathBuf,
     pub systemctl: PathBuf,
     pub bwrap: PathBuf,
+    /// Holds the `bus` socket of the user manager.
+    pub user_runtime_directory: PathBuf,
 }
 
 impl Default for Launcher {
+    /// The installed programs and the real runtime directory of the user, also when the daemon
+    /// runs with another `XDG_RUNTIME_DIR`.
     fn default() -> Self {
         Self {
             systemd_run: PathBuf::from("/usr/bin/systemd-run"),
             systemctl: PathBuf::from("/usr/bin/systemctl"),
             bwrap: PathBuf::from("/usr/bin/bwrap"),
+            user_runtime_directory: PathBuf::from(format!(
+                "/run/user/{}",
+                rustix::process::getuid().as_raw()
+            )),
         }
+    }
+}
+
+impl Launcher {
+    /// A launcher for a private user manager that a test set up, from
+    /// [`TEST_USER_RUNTIME_VARIABLE`]. `None` when the variable is not set, names the session's
+    /// own runtime directory, or the programs are missing.
+    pub fn private_test_manager() -> Option<Self> {
+        let directory = PathBuf::from(std::env::var_os(TEST_USER_RUNTIME_VARIABLE)?);
+        let launcher = Self {
+            user_runtime_directory: directory,
+            ..Self::default()
+        };
+        let own = Self::default().user_runtime_directory;
+        let usable = launcher.user_runtime_directory != own
+            && launcher.user_runtime_directory.join("bus").exists()
+            && launcher.bwrap.is_file()
+            && launcher.systemd_run.is_file();
+        usable.then_some(launcher)
+    }
+
+    /// Only the address of the user manager; nothing else of the daemon's environment goes on.
+    pub(crate) fn user_manager_environment(&self) -> [(&'static str, String); 2] {
+        let runtime = self.user_runtime_directory.to_string_lossy().into_owned();
+        [
+            (
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={runtime}/bus"),
+            ),
+            ("XDG_RUNTIME_DIR", runtime),
+        ]
     }
 }
 
@@ -70,25 +113,12 @@ pub(crate) fn systemd_run_arguments(
     .collect()
 }
 
-/// The user manager is found through the real runtime directory of the user, also when the
-/// daemon runs with another `XDG_RUNTIME_DIR`. Nothing else of the daemon's environment goes on.
-pub(crate) fn user_manager_environment() -> [(&'static str, String); 2] {
-    let runtime = format!("/run/user/{}", rustix::process::getuid().as_raw());
-    [
-        (
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path={runtime}/bus"),
-        ),
-        ("XDG_RUNTIME_DIR", runtime),
-    ]
-}
-
 /// Stops the unit of a run that went over a limit.
 pub(crate) async fn stop(launcher: &Launcher, unit: &str) {
     let stopped = Command::new(&launcher.systemctl)
         .args(["--user", "stop", unit])
         .env_clear()
-        .envs(user_manager_environment())
+        .envs(launcher.user_manager_environment())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -116,7 +146,7 @@ mod tests {
         assert!(arguments.contains(&"--property=MemoryMax=64M".to_owned()));
         assert!(arguments.contains(&"--property=RuntimeMaxSec=35".to_owned()));
         assert_eq!(arguments.last().unwrap(), "0");
-        let environment = user_manager_environment();
+        let environment = Launcher::default().user_manager_environment();
         assert!(
             environment
                 .iter()

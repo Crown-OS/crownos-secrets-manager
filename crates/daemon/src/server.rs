@@ -3,15 +3,16 @@
 
 use std::cell::RefCell;
 use std::os::fd::OwnedFd;
+use std::path::Path;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use crownos_ipc::adapter::tokio::serve_with_outbox;
-use crownos_ipc::{Kind, Message, MethodMsg, PeerId, RemoteError, Server};
+use crownos_ipc::{Kind, Message, MethodMsg, PeerId, RemoteError, Server, ServiceBuilder};
 use secrets_core::{
     Binding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome, VaultSettings,
 };
-use secrets_protocol::secrets::{self, Handler};
+use secrets_protocol::secrets::{self, PeerHandler};
 use secrets_protocol::transfer::read_value;
 use secrets_protocol::{
     ProxySessionReply, RequestId, RunReply, SecretMeta, TemplateMeta, VaultStatus,
@@ -34,6 +35,27 @@ enum Outgoing {
         request: u32,
         reply: Result<RunReply, RemoteError>,
     },
+}
+
+/// Binds the socket with a check of the sender of every frame, so a child that inherited a
+/// caller's socket cannot speak as that caller. Without pidfs or `SO_PASSPIDFD` it binds without
+/// the check and warns.
+///
+/// # Errors
+///
+/// Fails when the socket cannot be bound.
+pub fn bind_socket(directory: Option<&Path>) -> Result<Server, crownos_ipc::Error> {
+    let builder = |verify| {
+        let builder = ServiceBuilder::new(secrets::SERVICE).verify_sender_per_frame(verify);
+        match directory {
+            Some(directory) => builder.directory(directory),
+            None => builder,
+        }
+    };
+    builder(true).build().or_else(|error| {
+        tracing::warn!(%error, "no per-frame sender check on this kernel");
+        builder(false).build()
+    })
 }
 
 /// Serves until the socket fails. A run answers from a task when it ends, so it never holds up
@@ -130,9 +152,9 @@ fn dispatch<Identity: IdentifyCaller>(
     } else {
         let mut requests = PeerRequests {
             service: &mut *service,
-            caller: &caller,
+            identity,
         };
-        secrets::dispatch(&mut requests, server, peer, message)?;
+        secrets::dispatch_with_peer(&mut requests, server, peer, message)?;
     }
     for event in service.take_events() {
         if let Err(error) = server.emit(&event) {
@@ -180,43 +202,60 @@ fn start_run(
     }
 }
 
-struct PeerRequests<'request> {
+struct PeerRequests<'request, Identity> {
     service: &'request mut SecretsService,
-    caller: &'request Caller,
+    identity: &'request Identity,
 }
 
 fn window_target(window: &str) -> String {
     format!("window:{}", sanitized(window, MAX_WINDOW_CHARACTERS))
 }
 
-impl Handler for PeerRequests<'_> {
-    fn status(&mut self) -> Result<VaultStatus, RemoteError> {
-        Ok(self.service.status(self.caller, Instant::now()))
+impl<Identity: IdentifyCaller> PeerHandler for PeerRequests<'_, Identity> {
+    fn status(&mut self, peer: crownos_ipc::Caller<'_>) -> Result<VaultStatus, RemoteError> {
+        Ok(self
+            .service
+            .status(&self.identity.identify(peer.credentials), Instant::now()))
     }
 
-    fn list(&mut self) -> Result<Vec<SecretMeta>, RemoteError> {
+    fn list(&mut self, _peer: crownos_ipc::Caller<'_>) -> Result<Vec<SecretMeta>, RemoteError> {
         self.service.list(Instant::now()).map_err(Into::into)
     }
 
-    fn templates(&mut self) -> Result<Vec<TemplateMeta>, RemoteError> {
+    fn templates(
+        &mut self,
+        _peer: crownos_ipc::Caller<'_>,
+    ) -> Result<Vec<TemplateMeta>, RemoteError> {
         self.service.templates(Instant::now()).map_err(Into::into)
     }
 
     fn request(
         &mut self,
+        peer: crownos_ipc::Caller<'_>,
         name: SecretName,
         kind: SecretKind,
         purpose: String,
     ) -> Result<RequestId, RemoteError> {
         self.service
-            .request(self.caller, name, kind, &purpose, Instant::now())
+            .request(
+                &self.identity.identify(peer.credentials),
+                name,
+                kind,
+                &purpose,
+                Instant::now(),
+            )
             .map_err(Into::into)
     }
 
-    fn type_into(&mut self, name: SecretName, window: String) -> Result<UseOutcome, RemoteError> {
+    fn type_into(
+        &mut self,
+        peer: crownos_ipc::Caller<'_>,
+        name: SecretName,
+        window: String,
+    ) -> Result<UseOutcome, RemoteError> {
         self.service
             .use_secrets(
-                self.caller,
+                &self.identity.identify(peer.credentials),
                 &[name],
                 &window_target(&window),
                 Instant::now(),
@@ -226,13 +265,14 @@ impl Handler for PeerRequests<'_> {
 
     fn fill_login(
         &mut self,
+        peer: crownos_ipc::Caller<'_>,
         _username: String,
         password: SecretName,
         window: String,
     ) -> Result<UseOutcome, RemoteError> {
         self.service
             .use_secrets(
-                self.caller,
+                &self.identity.identify(peer.credentials),
                 &[password],
                 &window_target(&window),
                 Instant::now(),
@@ -243,6 +283,7 @@ impl Handler for PeerRequests<'_> {
     /// Never reached: [`start_run`] answers `run` before the generated dispatch sees it.
     fn run(
         &mut self,
+        _peer: crownos_ipc::Caller<'_>,
         _template: TemplateName,
         _arguments: Vec<String>,
         _cwd: String,
@@ -252,36 +293,67 @@ impl Handler for PeerRequests<'_> {
 
     fn proxy_session(
         &mut self,
+        peer: crownos_ipc::Caller<'_>,
         names: Vec<SecretName>,
         ttl_minutes: u32,
     ) -> Result<ProxySessionReply, RemoteError> {
         self.service
-            .proxy_session(self.caller, &names, ttl_minutes, Instant::now())
+            .proxy_session(
+                &self.identity.identify(peer.credentials),
+                &names,
+                ttl_minutes,
+                Instant::now(),
+            )
             .map_err(Into::into)
     }
 
-    fn revoke_session(&mut self, session: u64) -> Result<bool, RemoteError> {
-        Ok(self.service.revoke_session(self.caller, session))
+    fn revoke_session(
+        &mut self,
+        peer: crownos_ipc::Caller<'_>,
+        session: u64,
+    ) -> Result<bool, RemoteError> {
+        Ok(self
+            .service
+            .revoke_session(&self.identity.identify(peer.credentials), session))
     }
 
-    fn init(&mut self, master_password: OwnedFd) -> Result<(), RemoteError> {
+    fn init(
+        &mut self,
+        peer: crownos_ipc::Caller<'_>,
+        master_password: OwnedFd,
+    ) -> Result<(), RemoteError> {
         self.service
-            .init(self.caller, || read_value(&master_password), Instant::now())
+            .init(
+                &self.identity.identify(peer.credentials),
+                || read_value(&master_password),
+                Instant::now(),
+            )
             .map_err(Into::into)
     }
 
-    fn unlock(&mut self, master_password: OwnedFd) -> Result<(), RemoteError> {
+    fn unlock(
+        &mut self,
+        peer: crownos_ipc::Caller<'_>,
+        master_password: OwnedFd,
+    ) -> Result<(), RemoteError> {
         self.service
-            .unlock(self.caller, || read_value(&master_password), Instant::now())
+            .unlock(
+                &self.identity.identify(peer.credentials),
+                || read_value(&master_password),
+                Instant::now(),
+            )
             .map_err(Into::into)
     }
 
-    fn lock(&mut self) -> Result<(), RemoteError> {
-        self.service.lock(self.caller).map_err(Into::into)
+    fn lock(&mut self, peer: crownos_ipc::Caller<'_>) -> Result<(), RemoteError> {
+        self.service
+            .lock(&self.identity.identify(peer.credentials))
+            .map_err(Into::into)
     }
 
     fn add(
         &mut self,
+        peer: crownos_ipc::Caller<'_>,
         name: SecretName,
         kind: SecretKind,
         master_password: OwnedFd,
@@ -289,7 +361,7 @@ impl Handler for PeerRequests<'_> {
     ) -> Result<(), RemoteError> {
         self.service
             .add(
-                self.caller,
+                &self.identity.identify(peer.credentials),
                 &name,
                 kind,
                 || read_value(&master_password),
@@ -299,10 +371,15 @@ impl Handler for PeerRequests<'_> {
             .map_err(Into::into)
     }
 
-    fn remove(&mut self, name: SecretName, master_password: OwnedFd) -> Result<bool, RemoteError> {
+    fn remove(
+        &mut self,
+        peer: crownos_ipc::Caller<'_>,
+        name: SecretName,
+        master_password: OwnedFd,
+    ) -> Result<bool, RemoteError> {
         self.service
             .remove(
-                self.caller,
+                &self.identity.identify(peer.credentials),
                 &name,
                 || read_value(&master_password),
                 Instant::now(),
@@ -312,13 +389,14 @@ impl Handler for PeerRequests<'_> {
 
     fn bind(
         &mut self,
+        peer: crownos_ipc::Caller<'_>,
         name: SecretName,
         binding: Binding,
         master_password: OwnedFd,
     ) -> Result<(), RemoteError> {
         self.service
             .bind(
-                self.caller,
+                &self.identity.identify(peer.credentials),
                 &name,
                 binding,
                 || read_value(&master_password),
@@ -329,13 +407,14 @@ impl Handler for PeerRequests<'_> {
 
     fn set_template(
         &mut self,
+        peer: crownos_ipc::Caller<'_>,
         name: TemplateName,
         template: Option<RunTemplate>,
         master_password: OwnedFd,
     ) -> Result<(), RemoteError> {
         self.service
             .set_template(
-                self.caller,
+                &self.identity.identify(peer.credentials),
                 &name,
                 template,
                 || read_value(&master_password),
@@ -346,12 +425,13 @@ impl Handler for PeerRequests<'_> {
 
     fn configure(
         &mut self,
+        peer: crownos_ipc::Caller<'_>,
         settings: VaultSettings,
         master_password: OwnedFd,
     ) -> Result<(), RemoteError> {
         self.service
             .configure(
-                self.caller,
+                &self.identity.identify(peer.credentials),
                 settings,
                 || read_value(&master_password),
                 Instant::now(),

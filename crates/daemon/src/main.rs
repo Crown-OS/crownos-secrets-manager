@@ -1,6 +1,5 @@
 use anyhow::{Context as _, Result};
-use crownos_ipc::ServiceBuilder;
-use crownos_secretsd::{ProcExecutableIdentity, SecretsService, admin, hardening};
+use crownos_secretsd::{AcceptedProgramIdentity, SecretsService, admin, hardening};
 use secrets_protocol::secrets;
 use secrets_vault::Vault;
 use tracing_subscriber::EnvFilter;
@@ -16,13 +15,12 @@ async fn main() -> Result<()> {
         .context("finding the data directory")?
         .join("crownos");
     let vault = Vault::new(data_directory.join("secrets.vault"));
-    let service = SecretsService::new(vault, admin::admin_executables(), data_directory);
-    let mut server = ServiceBuilder::new(secrets::SERVICE)
-        .build()
-        .context("binding the secrets socket")?;
+    let service = SecretsService::new(vault, admin::AdminPolicy::installed(), data_directory);
+    let mut server =
+        crownos_secretsd::server::bind_socket(None).context("binding the secrets socket")?;
     tracing::info!("serving {}", secrets::SERVICE);
     tokio::select! {
-        served = crownos_secretsd::server::serve(&mut server, service, ProcExecutableIdentity) => {
+        served = crownos_secretsd::server::serve(&mut server, service, AcceptedProgramIdentity) => {
             served.context("serving")
         }
         _ = tokio::signal::ctrl_c() => Ok(()),

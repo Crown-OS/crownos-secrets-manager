@@ -3,6 +3,7 @@
 
 use std::time::Instant;
 
+use crownos_config::schema::AppKey;
 use secrecy::{ExposeSecret as _, SecretSlice};
 use secrets_core::{
     Binding, RunTemplate, SecretEntry, SecretKind, SecretName, TemplateName, VaultSettings,
@@ -130,6 +131,13 @@ impl SecretsService {
     ) -> Result<(), ServiceError> {
         self.change_vault(caller, "bind", Some(name), read_password, now, |vault| {
             binding.validate()?;
+            if let Some(agent) = binding
+                .agents
+                .iter()
+                .find(|agent| agent.parse::<AppKey>().is_err())
+            {
+                return Err(ServiceError::InvalidAgent(agent.clone()));
+            }
             if !vault.rules().secrets.contains_key(name) {
                 return Err(ServiceError::UnknownSecret(name.clone()));
             }

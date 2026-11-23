@@ -13,13 +13,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
-use crownos_ipc::{Pending, ServiceBuilder};
-use crownos_secretsd::{ProcExecutableIdentity, SecretsService};
+use crownos_ipc::Pending;
+use crownos_secretsd::{AcceptedProgramIdentity, AdminPolicy, SecretsService};
 use secrets_core::{
     Binding, Confirm, HttpBinding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome,
 };
 use secrets_protocol::secrets::{self, Client, Event};
 use secrets_protocol::{ProxySessionReply, RunReply, error_code, transfer};
+use secrets_run::Launcher;
 use secrets_vault::{KdfParams, Vault};
 use serde::de::DeserializeOwned;
 
@@ -68,11 +69,9 @@ fn start_daemon(
     admin: String,
     log: CapturedLog,
     concurrent_runs: usize,
+    launcher: Option<Launcher>,
 ) {
-    let mut server = ServiceBuilder::new(secrets::SERVICE)
-        .directory(socket_directory)
-        .build()
-        .unwrap();
+    let mut server = crownos_secretsd::server::bind_socket(Some(socket_directory)).unwrap();
     std::thread::spawn(move || {
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
@@ -86,9 +85,17 @@ fn start_daemon(
             iterations: 1,
             parallelism: 1,
         });
-        let service = SecretsService::new(vault, vec![admin], data_directory)
-            .with_concurrent_runs(concurrent_runs)
-            .with_upstream_roots(rustls::RootCertStore::empty());
+        let service = SecretsService::new(
+            vault,
+            AdminPolicy::trusting(vec![PathBuf::from(admin)]),
+            data_directory,
+        )
+        .with_concurrent_runs(concurrent_runs)
+        .with_launcher(launcher.unwrap_or_else(|| Launcher {
+            bwrap: PathBuf::from("/nonexistent/bwrap"),
+            ..Launcher::default()
+        }))
+        .with_upstream_roots(rustls::RootCertStore::empty());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -96,7 +103,7 @@ fn start_daemon(
         let _ = runtime.block_on(crownos_secretsd::server::serve(
             &mut server,
             service,
-            ProcExecutableIdentity,
+            AcceptedProgramIdentity,
         ));
     });
 }
@@ -155,7 +162,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 fn bound_to_this_test() -> Binding {
     Binding {
-        agents: vec![test_executable()],
+        agents: vec![format!("exe:{}", test_executable())],
         confirm: Some(Confirm::Never),
         ..Binding::default()
     }
@@ -186,6 +193,7 @@ fn no_reply_event_or_log_line_holds_a_value() {
         test_executable(),
         log.clone(),
         3,
+        Launcher::private_test_manager(),
     );
 
     let mut recorder = Recorder {
@@ -277,7 +285,7 @@ fn no_reply_event_or_log_line_holds_a_value() {
         )
     });
     assert!(request.is_ok());
-    if Path::new("/usr/bin/bwrap").is_file() {
+    if Launcher::private_test_manager().is_some() {
         let template = RunTemplate {
             command: vec![
                 "/usr/bin/sh".into(),
@@ -353,6 +361,7 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
         test_executable(),
         CapturedLog::default(),
         3,
+        Launcher::private_test_manager(),
     );
     let mut first = Recorder {
         client: Client::connect_in(&first_socket).unwrap(),
@@ -370,7 +379,7 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
         })
         .unwrap();
     let binding = Binding {
-        agents: vec!["/usr/bin/crownos-secrets-mcp".into()],
+        agents: vec!["exe:/usr/bin/crownos-secrets-mcp".into()],
         require_password_field: true,
         ..Binding::default()
     };
@@ -393,6 +402,7 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
         test_executable(),
         CapturedLog::default(),
         3,
+        Launcher::private_test_manager(),
     );
     let mut second = Recorder {
         client: Client::connect_in(&second_socket).unwrap(),
@@ -425,6 +435,7 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
         "/usr/bin/crownos-secrets".into(),
         CapturedLog::default(),
         3,
+        Launcher::private_test_manager(),
     );
     let mut third = Recorder {
         client: Client::connect_in(&third_socket).unwrap(),
@@ -447,8 +458,8 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
 
 #[test]
 fn a_large_run_output_fits_one_reply() {
-    if !Path::new("/usr/bin/bwrap").is_file() {
-        eprintln!("bwrap is not installed; skipping");
+    if Launcher::private_test_manager().is_none() {
+        eprintln!("no private user manager; skipping");
         return;
     }
     let directory = tempfile::tempdir().unwrap();
@@ -459,6 +470,7 @@ fn a_large_run_output_fits_one_reply() {
         test_executable(),
         CapturedLog::default(),
         3,
+        Launcher::private_test_manager(),
     );
     let mut recorder = Recorder {
         client: Client::connect_in(&socket_directory).unwrap(),
@@ -505,8 +517,8 @@ fn a_large_run_output_fits_one_reply() {
 
 #[test]
 fn runs_answer_later_and_a_run_over_the_limit_is_refused() {
-    if !Path::new("/usr/bin/bwrap").is_file() || !Path::new("/usr/bin/systemd-run").is_file() {
-        eprintln!("bwrap or systemd-run is missing; skipping");
+    if Launcher::private_test_manager().is_none() {
+        eprintln!("no private user manager; skipping");
         return;
     }
     let directory = tempfile::tempdir().unwrap();
@@ -517,6 +529,7 @@ fn runs_answer_later_and_a_run_over_the_limit_is_refused() {
         test_executable(),
         CapturedLog::default(),
         2,
+        Launcher::private_test_manager(),
     );
     let connect = || Recorder {
         client: Client::connect_in(&socket_directory).unwrap(),

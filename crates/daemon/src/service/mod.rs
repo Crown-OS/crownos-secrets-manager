@@ -17,6 +17,7 @@ use secrets_proxy::Proxy;
 use secrets_vault::Vault;
 
 use crate::Caller;
+use crate::admin::AdminPolicy;
 use crate::util::rate::RateLimiter;
 
 pub use error::ServiceError;
@@ -28,7 +29,7 @@ const DEFAULT_CONCURRENT_RUNS: usize = 3;
 
 pub struct SecretsService {
     vault: Vault,
-    admin_executables: Vec<String>,
+    admin: AdminPolicy,
     use_limiter: RateLimiter,
     request_limiter: RateLimiter,
     pending_requests: Vec<SecretRequest>,
@@ -58,10 +59,10 @@ impl std::fmt::Debug for SecretsService {
 
 impl SecretsService {
     /// `data_directory` gets the CA certificate of the proxy, `secrets-ca.pem`.
-    pub fn new(vault: Vault, admin_executables: Vec<String>, data_directory: PathBuf) -> Self {
+    pub fn new(vault: Vault, admin: AdminPolicy, data_directory: PathBuf) -> Self {
         Self {
             vault,
-            admin_executables,
+            admin,
             use_limiter: RateLimiter::per(Duration::from_secs(60)),
             request_limiter: RateLimiter::per(Duration::from_secs(60 * 60)),
             pending_requests: Vec::new(),
@@ -126,7 +127,7 @@ impl SecretsService {
     }
 
     fn is_admin(&self, caller: &Caller) -> bool {
-        caller.is_any_of(&self.admin_executables)
+        self.admin.allows(caller)
     }
 
     /// The sealed limits while unlocked; the defaults while locked.

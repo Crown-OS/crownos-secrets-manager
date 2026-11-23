@@ -19,6 +19,7 @@ secrets-run = { workspace = true }
 secrets-vault = { workspace = true }
 
 anyhow = { workspace = true }
+crownos-config = { workspace = true }
 rustls = { workspace = true }
 crownos-ipc = { workspace = true, features = ["tokio"] }
 dirs = { workspace = true }

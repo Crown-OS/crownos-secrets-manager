@@ -185,10 +185,10 @@ impl SecretsService {
             };
             entries.push(entry);
         }
-        let permitted = caller.app_key().is_some_and(|app_key| {
+        let permitted = caller.app_key_text().is_some_and(|app_key| {
             entries
                 .iter()
-                .all(|entry| entry.binding.allows_agent(app_key))
+                .all(|entry| entry.binding.allows_agent(&app_key))
         });
         if !permitted || names.is_empty() {
             return UseCheck::Refused(UseOutcome::Denied);

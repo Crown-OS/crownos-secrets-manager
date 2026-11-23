@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crownos_secretsd::{Caller, SecretsService, ServiceError};
+use crownos_secretsd::{AdminPolicy, Caller, SecretsService, ServiceError};
 use secrecy::SecretSlice;
 use secrets_core::{
     Binding, Confirm, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome, VaultSettings,
@@ -44,8 +44,11 @@ fn service(vault_path: &Path, now: Instant, settings: VaultSettings) -> SecretsS
         iterations: 1,
         parallelism: 1,
     });
-    let mut service =
-        SecretsService::new(vault, vec![ADMIN.into()], vault_path.with_extension("data"));
+    let mut service = SecretsService::new(
+        vault,
+        AdminPolicy::trusting(vec![ADMIN.into()]),
+        vault_path.with_extension("data"),
+    );
     service.init(&admin(), bytes(PASSWORD), now).unwrap();
     service
         .configure(&admin(), settings, bytes(PASSWORD), now)
@@ -61,7 +64,7 @@ fn service(vault_path: &Path, now: Instant, settings: VaultSettings) -> SecretsS
         )
         .unwrap();
     let binding = Binding {
-        agents: vec![AGENT.into()],
+        agents: vec![format!("exe:{AGENT}")],
         confirm: Some(Confirm::Never),
         ..Binding::default()
     };

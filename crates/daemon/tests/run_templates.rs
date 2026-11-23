@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crownos_secretsd::service::RunStart;
-use crownos_secretsd::{Caller, SecretsService};
+use crownos_secretsd::{AdminPolicy, Caller, SecretsService};
 use secrecy::SecretSlice;
 use secrets_core::{
     Binding, Confirm, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome, VaultSettings,
@@ -41,15 +41,6 @@ fn template_name(text: &str) -> TemplateName {
     TemplateName::parse(text).unwrap()
 }
 
-fn sandbox_available() -> bool {
-    let launcher = Launcher::default();
-    let available = launcher.bwrap.is_file() && launcher.systemd_run.is_file();
-    if !available {
-        eprintln!("bwrap or systemd-run is missing; skipping");
-    }
-    available
-}
-
 fn service(directory: &Path, launcher: Launcher, template: RunTemplate) -> SecretsService {
     let data_directory = directory.join("data");
     let vault = Vault::new(data_directory.join("secrets.vault")).with_kdf_params(KdfParams {
@@ -57,8 +48,12 @@ fn service(directory: &Path, launcher: Launcher, template: RunTemplate) -> Secre
         iterations: 1,
         parallelism: 1,
     });
-    let mut service =
-        SecretsService::new(vault, vec![ADMIN.into()], data_directory).with_launcher(launcher);
+    let mut service = SecretsService::new(
+        vault,
+        AdminPolicy::trusting(vec![ADMIN.into()]),
+        data_directory,
+    )
+    .with_launcher(launcher);
     let now = Instant::now();
     let name = SecretName::parse("token").unwrap();
     service.init(&admin(), bytes(PASSWORD), now).unwrap();
@@ -78,7 +73,7 @@ fn service(directory: &Path, launcher: Launcher, template: RunTemplate) -> Secre
         )
         .unwrap();
     let binding = Binding {
-        agents: vec![AGENT.into()],
+        agents: vec![format!("exe:{AGENT}")],
         confirm: Some(Confirm::Never),
         ..Binding::default()
     };
@@ -136,11 +131,12 @@ async fn run(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_template_runs_with_scrubbed_output() {
-    if !sandbox_available() {
+    let Some(launcher) = Launcher::private_test_manager() else {
+        eprintln!("no private user manager; skipping");
         return;
-    }
+    };
     let directory = tempfile::tempdir().unwrap();
-    let mut service = service(directory.path(), Launcher::default(), show_token(""));
+    let mut service = service(directory.path(), launcher, show_token(""));
     let reply = run(&mut service, &agent(), &["word"], "").await;
     let RunReply::Finished(output) = reply else {
         panic!("{reply:?}");
@@ -214,10 +210,14 @@ async fn refusals_come_before_the_sandbox() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_default_binding_needs_a_confirmation_for_a_run() {
     let directory = tempfile::tempdir().unwrap();
-    let mut service = service(directory.path(), Launcher::default(), show_token(""));
+    let unreachable = Launcher {
+        bwrap: PathBuf::from("/nonexistent/bwrap"),
+        ..Launcher::default()
+    };
+    let mut service = service(directory.path(), unreachable, show_token(""));
     let now = Instant::now();
     let default_confirm = Binding {
-        agents: vec![AGENT.into()],
+        agents: vec![format!("exe:{AGENT}")],
         ..Binding::default()
     };
     service

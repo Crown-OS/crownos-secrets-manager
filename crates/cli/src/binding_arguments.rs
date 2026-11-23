@@ -4,7 +4,8 @@ use secrets_core::{Binding, Confirm, HttpBinding, Target};
 
 #[derive(Debug, Args)]
 pub(crate) struct BindingArguments {
-    /// An agent that may use the secret, as the absolute path of its executable.
+    /// An agent that may use the secret: an app key such as `exe:/usr/bin/program`, or the
+    /// absolute path of an executable.
     #[arg(long = "agent")]
     agents: Vec<String>,
     /// A window app id where the secret may go; `*` matches any text.
@@ -55,8 +56,19 @@ impl BindingArguments {
             (None, None, None) => Vec::new(),
             _ => bail!("--http-host, --http-header and --http-format go together"),
         };
+        let agents = self
+            .agents
+            .into_iter()
+            .map(|agent| {
+                if agent.starts_with('/') {
+                    format!("exe:{agent}")
+                } else {
+                    agent
+                }
+            })
+            .collect();
         let binding = Binding {
-            agents: self.agents,
+            agents,
             targets,
             require_password_field: self.require_password_field,
             confirm: self.confirm,

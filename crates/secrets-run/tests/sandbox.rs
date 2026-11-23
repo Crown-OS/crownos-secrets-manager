@@ -18,18 +18,13 @@ use secrets_run::{
 
 const VALUE: &str = "ghp_PLANTED_run_value_0123456789";
 
-/// bwrap, systemd-run and a running user manager.
-fn bwrap_installed() -> bool {
-    let launcher = Launcher::default();
-    let manager = std::process::Command::new(&launcher.systemctl)
-        .args(["--user", "is-system-running"])
-        .output()
-        .is_ok_and(|output| !output.stdout.is_empty());
-    let installed = launcher.bwrap.is_file() && launcher.systemd_run.is_file() && manager;
-    if !installed {
-        eprintln!("bwrap, systemd-run or the user manager is missing; skipping");
+/// A private user manager that the test run set up; see `TEST_USER_RUNTIME_VARIABLE`.
+fn test_launcher() -> Option<Launcher> {
+    let launcher = Launcher::private_test_manager();
+    if launcher.is_none() {
+        eprintln!("no private user manager; skipping");
     }
-    installed
+    launcher
 }
 
 fn shell_template(script: &str) -> RunTemplate {
@@ -42,13 +37,14 @@ fn shell_template(script: &str) -> RunTemplate {
 }
 
 async fn run(
+    launcher: &Launcher,
     template: &RunTemplate,
     cwd: Option<&CheckedDirectory>,
 ) -> Result<SandboxOutput, SandboxError> {
     let mut scrubber = Scrubber::new();
     scrubber.add_secret(&SecretName::parse("planted").unwrap(), VALUE.as_bytes());
     run_in_sandbox(SandboxRequest {
-        launcher: &Launcher::default(),
+        launcher,
         template,
         arguments: &[],
         cwd,
@@ -67,11 +63,11 @@ fn text(bytes: &[u8]) -> String {
 
 #[tokio::test]
 async fn the_value_and_its_encodings_never_come_out() {
-    if !bwrap_installed() {
+    let Some(launcher) = test_launcher() else {
         return;
-    }
+    };
     let script = r#"echo "plain $SECRET"; printf %s "$SECRET" | base64; printf %s "$SECRET" | od -An -tx1 | tr -d ' \n'; echo; echo "err $SECRET" >&2"#;
-    let output = run(&shell_template(script), None).await.unwrap();
+    let output = run(&launcher, &shell_template(script), None).await.unwrap();
     let stdout = text(&output.stdout);
     let stderr = text(&output.stderr);
     assert_eq!(output.exit_code, Some(0), "{stdout} {stderr}");
@@ -87,12 +83,16 @@ async fn the_value_and_its_encodings_never_come_out() {
 
 #[tokio::test]
 async fn the_value_is_not_in_the_command_line_of_bwrap() {
-    if !bwrap_installed() {
+    let Some(launcher) = test_launcher() else {
         return;
-    }
-    let output = run(&shell_template("tr '\\0' ' ' < /proc/1/cmdline"), None)
-        .await
-        .unwrap();
+    };
+    let output = run(
+        &launcher,
+        &shell_template("tr '\\0' ' ' < /proc/1/cmdline"),
+        None,
+    )
+    .await
+    .unwrap();
     let stdout = text(&output.stdout);
     assert!(stdout.contains("--args"), "{stdout}");
     assert!(!stdout.contains("[secret:"), "{stdout}");
@@ -100,9 +100,9 @@ async fn the_value_is_not_in_the_command_line_of_bwrap() {
 
 #[tokio::test]
 async fn there_is_no_network_and_the_cwd_is_read_only() {
-    if !bwrap_installed() {
+    let Some(launcher) = test_launcher() else {
         return;
-    }
+    };
     let directory = tempfile::tempdir().unwrap();
     let checked = CheckedDirectory::check(directory.path()).unwrap();
     let cwd = checked.path().to_owned();
@@ -111,7 +111,9 @@ for descriptor in /proc/self/fd/*; do echo "fd:$(readlink "$descriptor")"; done
 echo "stdin-bytes:$(wc -c < /dev/stdin 2>/dev/null)"
 pwd
 touch written 2>/dev/null && echo wrote || echo read-only"#;
-    let output = run(&shell_template(script), Some(&checked)).await.unwrap();
+    let output = run(&launcher, &shell_template(script), Some(&checked))
+        .await
+        .unwrap();
     let stdout = text(&output.stdout);
     let interfaces: Vec<&str> = stdout
         .lines()
@@ -136,18 +138,18 @@ touch written 2>/dev/null && echo wrote || echo read-only"#;
 
 #[tokio::test]
 async fn time_and_output_limits_stop_the_command() {
-    if !bwrap_installed() {
+    let Some(launcher) = test_launcher() else {
         return;
-    }
+    };
     let mut slow = shell_template("sleep 30");
     slow.timeout_seconds = 1;
-    let output = run(&slow, None).await.unwrap();
+    let output = run(&launcher, &slow, None).await.unwrap();
     assert!(output.timed_out);
     assert_eq!(output.exit_code, None);
 
     let mut loud = shell_template("yes");
     loud.max_output_bytes = 10_000;
-    let output = run(&loud, None).await.unwrap();
+    let output = run(&launcher, &loud, None).await.unwrap();
     assert!(output.truncated);
 }
 
@@ -172,29 +174,29 @@ async fn a_missing_bwrap_is_reported() {
 
 #[tokio::test]
 async fn a_command_over_its_memory_limit_is_stopped() {
-    if !bwrap_installed() {
+    let Some(launcher) = test_launcher() else {
         return;
-    }
+    };
     let mut hungry =
         shell_template("big=$(head -c 200000000 /dev/zero | tr '\\0' a); echo ${#big}");
     hungry.memory_max_megabytes = 32;
     hungry.timeout_seconds = 30;
-    let output = run(&hungry, None).await.unwrap();
+    let output = run(&launcher, &hungry, None).await.unwrap();
     assert_ne!(output.exit_code, Some(0), "{output:?}");
     assert!(!text(&output.stdout).contains("200000000"), "{output:?}");
 }
 
 #[tokio::test]
 async fn a_directory_swapped_after_the_check_stops_the_run() {
-    if !bwrap_installed() {
+    let Some(launcher) = test_launcher() else {
         return;
-    }
+    };
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
     let swapped = CheckedDirectory::check(first.path())
         .unwrap()
         .with_identity_of(&CheckedDirectory::check(second.path()).unwrap());
-    let output = run(&shell_template("echo ran"), Some(&swapped))
+    let output = run(&launcher, &shell_template("echo ran"), Some(&swapped))
         .await
         .unwrap();
     assert_eq!(
@@ -208,10 +210,10 @@ async fn a_directory_swapped_after_the_check_stops_the_run() {
 
 #[tokio::test]
 async fn no_value_reaches_the_journal() {
-    if !bwrap_installed() {
+    let Some(launcher) = test_launcher() else {
         return;
-    }
-    let output = run(&shell_template(r#"echo "$SECRET""#), None)
+    };
+    let output = run(&launcher, &shell_template(r#"echo "$SECRET""#), None)
         .await
         .unwrap();
     assert_eq!(output.exit_code, Some(0), "{output:?}");

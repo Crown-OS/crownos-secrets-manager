@@ -10,5 +10,6 @@ pub mod server;
 pub mod service;
 mod util;
 
-pub use identity::{Caller, IdentifyCaller, ProcExecutableIdentity};
+pub use admin::AdminPolicy;
+pub use identity::{AcceptedProgramIdentity, Caller, IdentifyCaller};
 pub use service::{SecretsService, ServiceError};

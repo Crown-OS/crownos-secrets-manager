@@ -28,7 +28,7 @@ use tokio::process::Command;
 pub use arguments::DIRECTORY_CHANGED_EXIT_CODE;
 pub use directory::CheckedDirectory;
 pub use error::SandboxError;
-pub use launcher::Launcher;
+pub use launcher::{Launcher, TEST_USER_RUNTIME_VARIABLE};
 
 pub struct SandboxRequest<'request> {
     pub launcher: &'request Launcher,
@@ -90,7 +90,7 @@ pub async fn run_in_sandbox(request: SandboxRequest<'_>) -> Result<SandboxOutput
         ))
         .args(command_line)
         .env_clear()
-        .envs(launcher::user_manager_environment())
+        .envs(launcher.user_manager_environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

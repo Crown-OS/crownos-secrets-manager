@@ -44,7 +44,7 @@ arguments or into your shell history.
 crownos-secrets init                         # makes the vault and unlocks it
 crownos-secrets add github_token --kind token
 crownos-secrets bind github_token \
-    --agent /usr/bin/crownos-secrets-mcp \
+    --agent exe:/usr/bin/crownos-secrets-mcp \
     --origin 'https://*.github.com' \
     --confirm session:15 \
     --http-host api.github.com --http-header Authorization --http-format 'Bearer {value}' \
@@ -114,11 +114,14 @@ Not all rules apply yet:
 
 ## Who may call what
 
-The daemon finds the caller from the peer credentials of the socket. It reads
-`/proc/<pid>/exe` of the peer while the pidfd shows that the process that connected still runs.
-This names the program that the peer runs now. It does not stop a process that connects and then
-runs `exec`, or that gives its socket to another process. The executable path is the key for
-`agents`.
+The daemon names each caller by its `AppKey` (crownos-config): `exe:<path>` for a native
+program, `interp:<interpreter>:<script>` for a script on a known runtime. crownos-ipc reads the
+program of the peer once, when it connects: the executable (with a check of its device and
+inode), the command line and the working directory. A runtime that runs code without a file
+(`python -c`) has no key and is unidentified. The socket checks the sender of every frame
+(`SO_PASSPIDFD`), so a child that inherited a caller's socket cannot speak as that caller; on a
+kernel without pidfs the daemon warns and runs without that check. Bindings name agents by their
+key; the CLI turns an absolute path given to `--agent` into `exe:<path>`.
 
 | Calls | Who may call |
 | --- | --- |
@@ -129,8 +132,9 @@ runs `exec`, or that gives its socket to another process. The executable path is
 | `lock` | Admin executables |
 
 The admin executables are `/usr/bin/crownos-secrets` and `/usr/bin/crownos-settings`. They are
-compiled in. A debug build also accepts the paths in `CROWNOS_SECRETS_DEBUG_ADMIN_EXECUTABLES`,
-separated by `:`. The executable check is the second layer; the master password is the first.
+compiled in, and the file and its directory must belong to root and be closed to writes by others.
+A debug build also accepts the paths in `CROWNOS_SECRETS_DEBUG_ADMIN_EXECUTABLES`, separated by
+`:`, without that check. The executable check is the second layer; the master password is the first.
 The daemon checks the executable before it reads the password pipe, and the password before it
 reads the value pipe.
 
@@ -296,12 +300,10 @@ Register templates with care:
 ## Hardening
 
 - The daemon sets `PR_SET_DUMPABLE=0` at start. There is no core dump. A process of your user
-  cannot attach with ptrace or read `/proc/<pid>/mem` of the daemon. The CLI does the same only
-  while it reads the master password or a value. Then it is dumpable again, because the daemon
-  must read `/proc/<pid>/exe` of the CLI, and the kernel refuses that for a non-dumpable process.
-  Until the request goes out, the pipe read ends are open in the CLI, and a process of your user
-  can read them through `/proc/<pid>/fd`. A later caller identity from `SO_PEERPIDFD` has the same
-  limit if it also reads `/proc/<pid>/exe`.
+  cannot attach with ptrace or read `/proc/<pid>/mem` of the daemon. The CLI first connects,
+  then turns dumpable off for the rest of its life, before it asks for a password or a value. The
+  order matters: the daemon reads the program of the CLI at accept, and the kernel refuses that
+  read for a process that is already non-dumpable.
 - The daemon locks the pages of the key and of each value with `mlock`. It never unlocks them:
   `mlock` works on full pages, and a page can hold other data too. When `RLIMIT_MEMLOCK` stops a
   lock, the daemon logs this one time.
@@ -347,15 +349,14 @@ Use the Claude Code sandbox with `failIfUnavailable` to make an agent shell less
 
 ### Known limits
 
-- All MCP agents connect through `crownos-secrets-mcp`, so they have one identity. A binding cannot
-  tell two agents apart until crownos-ipc gives a pidfd from `SO_PEERPIDFD` and crownos-config an
-  `AppKey`. The `IdentifyCaller` trait in `crates/daemon/src/identity.rs` is the one place that
-  changes then.
+- All MCP agents connect through `crownos-secrets-mcp`, so they have one key,
+  `exe:/usr/bin/crownos-secrets-mcp`. A binding cannot tell two agents behind it apart.
 - The daemon keeps `last_used` in memory only.
 - Open requests do not expire. Because all MCP agents share one identity, four open requests
   block `request` for every agent until the user answers them with `add`.
-- The sandbox tests skip when bwrap, systemd-run or the user manager is missing, but fail where
-  unprivileged user namespaces are off.
+- Tests that start runs need a private user manager. They read its runtime directory from
+  `CROWNOS_SECRETS_TEST_USER_RUNTIME` and skip without it; they never use the session's own
+  user manager.
 - `rpassword` reads the prompt into a `String` that can grow. A grown buffer is not zeroed.
 - TODO: seal the vault key with `systemd-creds --user` (and TPM2 when present), so the vault can
   unlock at login without a typed master password.

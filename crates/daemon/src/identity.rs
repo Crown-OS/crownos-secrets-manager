@@ -1,46 +1,63 @@
-//! Who is calling. For now the caller is the executable of the peer process. A later crownos-ipc
-//! gives a pidfd from `SO_PEERPIDFD` and crownos-config an `AppKey`; only this module changes then.
+//! Who is calling: the `AppKey` of the program that connected, from what crownos-ipc read once
+//! at accept (the executable with its device and inode, the command line and the working
+//! directory). A process that turns off `PR_SET_DUMPABLE` after it connects keeps its identity;
+//! one that turns it off first stays unidentified.
 
 use std::fmt;
-use std::os::fd::OwnedFd;
 use std::path::Path;
 
+use crownos_config::schema::AppKey;
 use crownos_ipc::Credentials;
-use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caller {
-    app_key: Option<String>,
+    app_key: Option<AppKey>,
 }
 
 impl Caller {
-    pub fn from_executable(executable: &Path) -> Self {
+    pub const fn from_app_key(app_key: AppKey) -> Self {
         Self {
-            app_key: executable.to_str().map(str::to_owned),
+            app_key: Some(app_key),
         }
+    }
+
+    /// An unsandboxed native program, as `exe:<path>`.
+    pub fn from_executable(executable: &Path) -> Self {
+        Self::from_app_key(AppKey::HostExecutable {
+            path: executable.to_owned(),
+        })
     }
 
     pub const fn unidentified() -> Self {
         Self { app_key: None }
     }
 
-    /// The key that bindings and the admin list name. `None` matches nothing.
-    pub fn app_key(&self) -> Option<&str> {
-        self.app_key.as_deref()
+    /// The key that bindings and approvals name. `None` matches nothing.
+    pub const fn app_key(&self) -> Option<&AppKey> {
+        self.app_key.as_ref()
     }
 
-    pub fn is_any_of(&self, app_keys: &[String]) -> bool {
-        self.app_key()
-            .is_some_and(|app_key| app_keys.iter().any(|allowed| allowed == app_key))
+    /// The text form, `exe:<path>` and the like, that bindings store.
+    pub fn app_key_text(&self) -> Option<String> {
+        self.app_key.as_ref().map(AppKey::to_string)
+    }
+
+    /// The name for the user in a dialog: the app id, component, program or script.
+    pub fn display_name(&self) -> String {
+        self.app_key.as_ref().map_or_else(
+            || "an unidentified program".to_owned(),
+            AppKey::display_name,
+        )
     }
 }
 
-/// Without control characters, because the path goes into audit lines and events.
+/// Without control characters, because the key goes into audit lines and events.
 impl fmt::Display for Caller {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.app_key()
-            .unwrap_or("unidentified")
-            .chars()
+        let text = self
+            .app_key_text()
+            .unwrap_or_else(|| "unidentified".to_owned());
+        text.chars()
             .filter(|character| !character.is_control())
             .try_for_each(|character| fmt::Write::write_char(formatter, character))
     }
@@ -50,34 +67,25 @@ pub trait IdentifyCaller {
     fn identify(&self, credentials: &Credentials) -> Caller;
 }
 
-/// The caller is the target of `/proc/<pid>/exe`, read while the pidfd shows that the process
-/// that connected still runs. This names the program the peer runs now. It does not stop a
-/// process that connects and then runs `exec`, or that hands its socket to another process. So
-/// the name is a second layer: admin calls that change the vault also need the master password.
+/// The program that crownos-ipc read at accept, keyed by `AppKey::of_program`. A runtime that
+/// gets no key (`python -c`, a loader) is unidentified.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ProcExecutableIdentity;
+pub struct AcceptedProgramIdentity;
 
-impl IdentifyCaller for ProcExecutableIdentity {
+impl IdentifyCaller for AcceptedProgramIdentity {
     fn identify(&self, credentials: &Credentials) -> Caller {
-        let Some(pidfd) = credentials.pidfd.as_ref() else {
-            return Caller::unidentified();
-        };
-        let executable = std::fs::read_link(format!("/proc/{}/exe", credentials.pid));
-        match executable {
-            Ok(executable) if process_still_runs(pidfd) => Caller::from_executable(&executable),
-            _ => Caller::unidentified(),
-        }
+        credentials
+            .program
+            .as_ref()
+            .and_then(|program| {
+                AppKey::of_program(
+                    &program.executable,
+                    &program.arguments,
+                    program.working_directory.as_deref(),
+                )
+            })
+            .map_or_else(Caller::unidentified, Caller::from_app_key)
     }
-}
-
-/// A pidfd becomes readable when its process exits.
-fn process_still_runs(pidfd: &OwnedFd) -> bool {
-    let mut descriptors = [PollFd::new(pidfd, PollFlags::IN)];
-    let no_wait = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    matches!(poll(&mut descriptors, Some(&no_wait)), Ok(0))
 }
 
 #[cfg(test)]
@@ -88,27 +96,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_live_peer_is_named_by_its_executable() {
+    fn a_live_peer_is_named_by_its_program() {
         let (ours, _theirs) = UnixStream::pair().unwrap();
-        let credentials = rustix::net::sockopt::socket_peercred(&ours).unwrap();
-        let credentials = Credentials {
-            uid: credentials.uid.as_raw(),
-            gid: credentials.gid.as_raw(),
-            pid: credentials.pid.as_raw_nonzero().get(),
-            pidfd: rustix::process::pidfd_open(
-                credentials.pid,
-                rustix::process::PidfdFlags::empty(),
-            )
-            .ok(),
-        };
-        let caller = ProcExecutableIdentity.identify(&credentials);
+        let credentials = Credentials::from_socket(&ours).unwrap();
+        let caller = AcceptedProgramIdentity.identify(&credentials);
         let executable = std::env::current_exe().unwrap();
         assert_eq!(caller, Caller::from_executable(&executable));
+        assert_eq!(caller.to_string(), format!("exe:{}", executable.display()));
     }
 
     #[test]
-    fn an_unidentified_caller_matches_no_list() {
-        assert!(!Caller::unidentified().is_any_of(&[String::new()]));
+    fn an_unidentified_caller_has_no_key() {
+        assert_eq!(Caller::unidentified().app_key(), None);
         assert_eq!(Caller::unidentified().to_string(), "unidentified");
     }
 }

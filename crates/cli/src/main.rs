@@ -80,22 +80,22 @@ enum Command {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Init => {
+            let mut daemon = Daemon::connect()?;
             let password = prompt::new_master_password()?;
-            Daemon::connect()?.call(|client| client.init(password))?;
+            daemon.call(|client| client.init(password))?;
             println!("The vault is ready and unlocked.");
         }
         Command::Unlock => {
+            let mut daemon = Daemon::connect()?;
             let password = prompt::master_password()?;
-            Daemon::connect()?.call(|client| client.unlock(password))?;
+            daemon.call(|client| client.unlock(password))?;
         }
         Command::Lock => Daemon::connect()?.call(|client| client.lock())?,
         Command::Add { name, kind } => {
             let mut daemon = Daemon::connect()?;
-            let (password, value) = prompt::while_holding_secrets(|| {
-                let password = prompt::master_password()?;
-                let value = prompt::hidden(&format!("Value for {name}: "))?;
-                Ok((password, value_pipe(value.as_bytes())?))
-            })?;
+            let password = prompt::master_password()?;
+            let value = prompt::hidden(&format!("Value for {name}: "))?;
+            let value = value_pipe(value.as_bytes())?;
             daemon.call(|client| client.add(name.clone(), kind, password, value))?;
             println!(
                 "Stored {name}. Run `crownos-secrets bind {name} --agent <path>` to let an agent use it."
