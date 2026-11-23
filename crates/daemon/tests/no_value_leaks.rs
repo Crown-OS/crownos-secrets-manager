@@ -16,7 +16,8 @@ use base64::Engine as _;
 use crownos_ipc::Pending;
 use crownos_secretsd::{AcceptedProgramIdentity, AdminPolicy, SecretsService};
 use secrets_core::{
-    Binding, Confirm, HttpBinding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome,
+    Binding, Confirm, HttpBinding, RunTemplate, SecretKind, SecretName, Target, TemplateName,
+    UseOutcome,
 };
 use secrets_protocol::secrets::{self, Client, Event};
 use secrets_protocol::{ProxySessionReply, RunReply, TypingTarget, error_code, transfer};
@@ -178,6 +179,7 @@ fn bound_to_this_test() -> Binding {
 
 fn bound_with_http() -> Binding {
     Binding {
+        targets: vec![Target::AppId("org.example.*".into())],
         http: vec![HttpBinding {
             host: "api.example.com".into(),
             header: "Authorization".into(),

@@ -10,12 +10,14 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with_ansi(false)
         .init();
+    let typing = crownos_secretsd::typing::CompositorTyping::connect_from_environment();
     hardening::forbid_core_dumps_and_tracing().context("making the process non-dumpable")?;
     let data_directory = dirs::data_dir()
         .context("finding the data directory")?
         .join("crownos");
     let vault = Vault::new(data_directory.join("secrets.vault"));
-    let service = SecretsService::new(vault, admin::AdminPolicy::installed(), data_directory);
+    let service = SecretsService::new(vault, admin::AdminPolicy::installed(), data_directory)
+        .with_typing(typing);
     let mut server =
         crownos_secretsd::server::bind_socket(None).context("binding the secrets socket")?;
     tracing::info!("serving {}", secrets::SERVICE);

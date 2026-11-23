@@ -20,6 +20,7 @@ secrets-vault = { workspace = true }
 
 anyhow = { workspace = true }
 crownos-config = { workspace = true }
+crownos-protocols = { workspace = true }
 rustls = { workspace = true }
 crownos-ipc = { workspace = true, features = ["tokio"] }
 dirs = { workspace = true }
@@ -30,9 +31,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+wayland-client = { workspace = true }
 zbus = { workspace = true }
 
 [dev-dependencies]
+crownos-protocols = { workspace = true, features = ["server"] }
+wayland-server = "0.31"
 base64 = { workspace = true }
 secrets-run = { workspace = true }
 serde = { workspace = true }

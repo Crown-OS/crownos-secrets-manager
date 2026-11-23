@@ -113,7 +113,7 @@ Not all rules apply yet:
   dialog for 60 seconds, and while one dialog of an agent is open, its other uses are refused.
   Without a reachable portal, the use is refused with `NeedsConfirmation`. The request loop
   answers other callers while a dialog is open.
-- `targets` and `require_password_field` apply from S4 (typing through the compositor).
+- `targets` and `require_password_field` apply to typing only.
 - `uses_per_minute` counts calls (`run`, `proxy_session` and the others), not the requests that
   go through one proxy session.
 
@@ -402,13 +402,35 @@ not find these:
   store a low-entropy secret (a short PIN, a dictionary word) for agent use: a few guesses find
   it. A very short value can also appear inside a label by chance.
 
+## Typing into windows (S4a)
+
+`type_into` and `fill_login` type a secret into the focused field of a window. The caller gives a
+target: the window identifier, its app id, and for a browser tab the page origin. computer-use's
+`type_secret` and `fill_login` tools fill it from the element they focus; the origin is a hint
+that the compositor checks again.
+
+1. The daemon checks the binding as for any use, then its `targets`: an `AppId` pattern must
+   match the app id, or an `Origin` pattern the origin. A refusal comes before any dialog
+   (`Denied`, or `OriginMismatch` for a wrong origin).
+2. The confirmation dialog runs when `confirm` asks for it.
+3. The daemon sends `type_secret` on `crownos_secret_input_v1` with the value in a sealed memfd.
+   `fill_login` sends the user name with Tab after it, then the password into a password field.
+   A secret with `require_password_field` goes only into a password field.
+4. The compositor shows its own confirmation, checks the focus and the field, types, and answers
+   `typed`, `focus_changed`, `not_password_field`, `refused` or `cancelled`. The reply maps them
+   to `Done`, `FocusChanged`, `NotPasswordField`, `Denied` and `Cancelled`.
+
+The daemon connects to Wayland when it starts, before it turns dumpable off, so the compositor can
+identify it. Without a compositor at that time, or while the compositor does not offer the
+global (crownpositor gets it in S4b), typing answers `UNAVAILABLE`; restart the daemon after the
+compositor runs.
+
 ## Plan
 
-- **S4: typing through the compositor.** A new `crownos_secret_input_v1` protocol in
-  crownos-protocols, which only `crownos-secretsd` can bind. The compositor shows a confirmation
-  that names the agent, the secret, the window and the origin, and ignores synthetic input on it.
-  It checks the focused surface and the `text_input_v3` password purpose, marks the window
-  sensitive, and types the value. Terminals are refused; use `run` for them.
+- **S4b: the compositor side.** crownpositor implements `crownos_secret_input_v1` as its
+  description says: a confirmation it draws itself, immune to synthetic input; focus and
+  password-purpose checks; no terminals; the window sensitive from before the first key to 30 s
+  after; the value zeroed after use. It also checks the origin again through computer-use.
 
 ## Development
 

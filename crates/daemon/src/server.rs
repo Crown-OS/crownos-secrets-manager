@@ -22,7 +22,7 @@ use crate::util::caller_text::sanitized;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::confirmation::{DialogRequest, Verdict};
-use crate::service::{Confirmation, RunStart};
+use crate::service::{Confirmation, RunStart, TypingShape, TypingStart, typing_outcome};
 use crate::{Caller, IdentifyCaller, SecretsService};
 
 const LOCK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
@@ -202,6 +202,7 @@ fn dispatch<Identity: IdentifyCaller>(
         });
     if message.kind == Kind::Request
         && let Some((names, target)) = use_request(service, &message)
+        && !typing_target_refused(service, &message, &names)
     {
         match service.confirmation_for(&caller, &names, &target, Instant::now()) {
             Confirmation::Ask(request) => {
@@ -228,6 +229,68 @@ fn dispatch<Identity: IdentifyCaller>(
         }
     }
     dispatched
+}
+
+/// A typing request whose target the bindings refuse gets no dialog; dispatch refuses it.
+fn typing_target_refused(
+    service: &mut SecretsService,
+    message: &Message,
+    names: &[SecretName],
+) -> bool {
+    typing_request(message).is_some_and(|(_, target, _)| {
+        service
+            .typing_target_refusal(names, &target, Instant::now())
+            .is_some()
+    })
+}
+
+/// The secrets, target and shape of a `type_into` or `fill_login` request.
+fn typing_request(message: &Message) -> Option<(Vec<SecretName>, TypingTarget, TypingShape)> {
+    let payload = &message.payload;
+    if message.selector == <secrets::type_into as MethodMsg>::SELECTOR {
+        let request: secrets::type_into = crownos_ipc::postcard::from_bytes(payload).ok()?;
+        return Some((vec![request.name], request.target, TypingShape::Single));
+    }
+    if message.selector == <secrets::fill_login as MethodMsg>::SELECTOR {
+        let request: secrets::fill_login = crownos_ipc::postcard::from_bytes(payload).ok()?;
+        return Some((
+            vec![request.username, request.password],
+            request.target,
+            TypingShape::Login,
+        ));
+    }
+    None
+}
+
+/// Checks a typing request at once; the compositor's answer comes from a task.
+#[allow(clippy::too_many_arguments)]
+fn start_typing(
+    service: &mut SecretsService,
+    caller: &Caller,
+    server: &mut Server,
+    peer: PeerId,
+    request: u32,
+    names: &[SecretName],
+    target: &TypingTarget,
+    shape: TypingShape,
+    outgoing: &UnboundedSender<Outgoing>,
+) {
+    let text = typing_target_text(target);
+    match service.start_typing(caller, names, target, shape, &text, Instant::now()) {
+        Ok(TypingStart::Refused(outcome)) => send_reply(server, peer, request, &Ok(outcome)),
+        Err(error) => send_reply::<UseOutcome>(server, peer, request, &Err(error.into())),
+        Ok(TypingStart::Waiting(answer)) => {
+            let outgoing = outgoing.clone();
+            tokio::spawn(async move {
+                let outcome = answer.await.map_or(UseOutcome::Cancelled, typing_outcome);
+                let _ = outgoing.send(Outgoing::Reply {
+                    peer,
+                    request,
+                    reply: encoded(Ok(outcome)),
+                });
+            });
+        }
+    }
 }
 
 /// Opens the dialog in a task; the answer comes back as [`Outgoing::Answered`].
@@ -322,6 +385,22 @@ fn dispatch_now<Identity: IdentifyCaller>(
         start_run(service, caller, server, peer, &message, finished_runs);
         return Ok(());
     }
+    if message.kind == Kind::Request
+        && let Some((names, target, shape)) = typing_request(&message)
+    {
+        start_typing(
+            service,
+            caller,
+            server,
+            peer,
+            message.req_id,
+            &names,
+            &target,
+            shape,
+            finished_runs,
+        );
+        return Ok(());
+    }
     let mut requests = PeerRequests {
         service: &mut *service,
         identity,
@@ -408,37 +487,25 @@ impl<Identity: IdentifyCaller> PeerHandler for PeerRequests<'_, Identity> {
             .map_err(Into::into)
     }
 
+    /// Never reached: [`start_typing`] answers `type_into` first.
     fn type_into(
         &mut self,
-        peer: crownos_ipc::Caller<'_>,
-        name: SecretName,
-        target: TypingTarget,
+        _peer: crownos_ipc::Caller<'_>,
+        _name: SecretName,
+        _target: TypingTarget,
     ) -> Result<UseOutcome, RemoteError> {
-        self.service
-            .use_secrets(
-                &self.identity.identify(peer.credentials),
-                &[name],
-                &typing_target_text(&target),
-                Instant::now(),
-            )
-            .map_err(Into::into)
+        Err(RemoteError::handler("typing is answered by its own task"))
     }
 
+    /// Never reached: [`start_typing`] answers `fill_login` first.
     fn fill_login(
         &mut self,
-        peer: crownos_ipc::Caller<'_>,
-        username: SecretName,
-        password: SecretName,
-        target: TypingTarget,
+        _peer: crownos_ipc::Caller<'_>,
+        _username: SecretName,
+        _password: SecretName,
+        _target: TypingTarget,
     ) -> Result<UseOutcome, RemoteError> {
-        self.service
-            .use_secrets(
-                &self.identity.identify(peer.credentials),
-                &[username, password],
-                &typing_target_text(&target),
-                Instant::now(),
-            )
-            .map_err(Into::into)
+        Err(RemoteError::handler("typing is answered by its own task"))
     }
 
     /// Never reached: [`start_run`] answers `run` before the generated dispatch sees it.

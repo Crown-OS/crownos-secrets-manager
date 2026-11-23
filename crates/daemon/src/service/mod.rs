@@ -6,6 +6,7 @@ mod confirmations;
 mod error;
 mod proxy_calls;
 mod run_calls;
+mod typing_calls;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -25,6 +26,7 @@ use crate::util::rate::RateLimiter;
 pub use confirmations::Confirmation;
 pub use error::ServiceError;
 pub use run_calls::{RunJob, RunStart};
+pub use typing_calls::{TypingShape, TypingStart, typing_outcome};
 
 const MAX_PENDING_REQUESTS: usize = 64;
 const MAX_PENDING_REQUESTS_PER_CALLER: usize = 4;
@@ -51,6 +53,7 @@ pub struct SecretsService {
     deny_cool_downs: HashMap<String, Instant>,
     session_approvals: HashMap<(String, SecretName), Instant>,
     open_dialogs: HashSet<String>,
+    typing: crate::typing::CompositorTyping,
     run_slots: std::sync::Arc<tokio::sync::Semaphore>,
     protected_directories: Vec<PathBuf>,
 }
@@ -87,6 +90,7 @@ impl SecretsService {
             deny_cool_downs: HashMap::new(),
             session_approvals: HashMap::new(),
             open_dialogs: HashSet::new(),
+            typing: crate::typing::CompositorTyping::unavailable(),
             run_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(DEFAULT_CONCURRENT_RUNS)),
             protected_directories: run_calls::protected_directories(&data_directory),
             data_directory,
@@ -109,6 +113,13 @@ impl SecretsService {
 
     pub(crate) fn confirmation_asker(&self) -> std::sync::Arc<dyn ConfirmationAsker> {
         std::sync::Arc::clone(&self.asker)
+    }
+
+    /// The compositor connection that types secrets; unavailable when not set.
+    #[must_use]
+    pub fn with_typing(mut self, typing: crate::typing::CompositorTyping) -> Self {
+        self.typing = typing;
+        self
     }
 
     /// How many runs may go on at the same time; 3 when not set.

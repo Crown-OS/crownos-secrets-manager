@@ -9,6 +9,7 @@ pub mod hardening;
 pub mod identity;
 pub mod server;
 pub mod service;
+pub mod typing;
 mod util;
 
 pub use admin::AdminPolicy;
