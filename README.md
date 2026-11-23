@@ -102,6 +102,14 @@ locked, `list` and `templates` answer "locked".
 
 The default binding allows nothing. An agent can use a secret only when `agents` names it.
 
+Not all rules apply yet:
+
+- `confirm`, `targets` and `require_password_field` apply from S4 (typing through the
+  compositor). `run` and `proxy_session` use a secret without a confirmation on screen, also when
+  `confirm` is `EveryUse`.
+- `uses_per_minute` counts calls (`run`, `proxy_session` and the others), not the requests that
+  go through one proxy session.
+
 ## Who may call what
 
 The daemon finds the caller from the peer credentials of the socket. It reads
@@ -226,7 +234,9 @@ The sandbox is bubblewrap with:
 - a read-only `/usr` and `/etc`, a new `/proc`, `/dev` and `/tmp`, and nothing of your home
   except the working directory (read-only unless `cwd_writable`)
 - no network when the template names no hosts (`--unshare-net`). When it names hosts, the command
-  shares the network of the daemon: the host list is not an allow list yet.
+  shares the full network of the daemon: the host list is not an allow list yet. A template with
+  hosts and `allow_arguments` lets the caller send a value to any host, so register such a
+  template only for a command that you trust with the caller's arguments.
 - an empty environment except `PATH`, `HOME=/tmp`, `LANG` and the template variables
 - `/usr/bin/sh` in the sandbox (it puts `/dev/null` on standard input)
 
@@ -238,16 +248,23 @@ itself gets the values in its environment, so a process of your user can read th
 `/proc/<pid>/environ` while it runs.
 
 stdout and stderr go through a scrubber with every value in the vault, as they stream. A run stops
-at `timeout_seconds` and at `max_output_bytes`, and the reply says so. While a run goes on, the
-daemon answers no other request.
+at `timeout_seconds` (at most 600) and at `max_output_bytes` (at most 512 KiB), and the reply
+says so. The scrubbed text in the reply is cut to 640 KiB of stdout and 128 KiB of stderr, so it
+fits one IPC frame. While a run goes on, the daemon answers no other request, and the vault does
+not lock on time until the run ends.
+
+The sandboxed command is in the cgroup of the daemon, so `MemoryMax=384M` and `MemorySwapMax=0`
+also apply to it. A command that uses too much memory can make the kernel stop the daemon too.
 
 ## Hardening
 
 - The daemon sets `PR_SET_DUMPABLE=0` at start. There is no core dump. A process of your user
-  cannot attach with ptrace or read `/proc/<pid>/mem` of the daemon. The CLI does the same while
-  it reads the master password or a value. When both are in their pipes, it is dumpable again,
-  because the daemon must read `/proc/<pid>/exe` of the CLI, and the kernel refuses that for a
-  non-dumpable process.
+  cannot attach with ptrace or read `/proc/<pid>/mem` of the daemon. The CLI does the same only
+  while it reads the master password or a value. Then it is dumpable again, because the daemon
+  must read `/proc/<pid>/exe` of the CLI, and the kernel refuses that for a non-dumpable process.
+  Until the request goes out, the pipe read ends are open in the CLI, and a process of your user
+  can read them through `/proc/<pid>/fd`. A later caller identity from `SO_PEERPIDFD` has the same
+  limit if it also reads `/proc/<pid>/exe`.
 - The daemon locks the pages of the key and of each value with `mlock`. It never unlocks them:
   `mlock` works on full pages, and a page can hold other data too. When `RLIMIT_MEMLOCK` stops a
   lock, the daemon logs this one time.
@@ -298,6 +315,10 @@ Use the Claude Code sandbox with `failIfUnavailable` to make an agent shell less
   `AppKey`. The `IdentifyCaller` trait in `crates/daemon/src/identity.rs` is the one place that
   changes then.
 - The daemon keeps `last_used` in memory only.
+- Open requests do not expire. Because all MCP agents share one identity, four open requests
+  block `request` for every agent until the user answers them with `add`.
+- The sandbox tests skip when bwrap is missing, but fail where unprivileged user namespaces are
+  off.
 - `rpassword` reads the prompt into a `String` that can grow. A grown buffer is not zeroed.
 - TODO: seal the vault key with `systemd-creds --user` (and TPM2 when present), so the vault can
   unlock at login without a typed master password.

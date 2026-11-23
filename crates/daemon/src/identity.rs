@@ -35,9 +35,14 @@ impl Caller {
     }
 }
 
+/// Without control characters, because the path goes into audit lines and events.
 impl fmt::Display for Caller {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.app_key().unwrap_or("unidentified"))
+        self.app_key()
+            .unwrap_or("unidentified")
+            .chars()
+            .filter(|character| !character.is_control())
+            .try_for_each(|character| fmt::Write::write_char(formatter, character))
     }
 }
 

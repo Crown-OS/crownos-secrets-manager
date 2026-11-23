@@ -12,9 +12,14 @@ use secrets_run::{SandboxError, SandboxRequest, run_in_sandbox};
 
 use super::{SecretsService, ServiceError};
 use crate::util::caller_text::sanitized;
+use crate::util::reply_text::capped_text;
 use crate::{Caller, audit};
 
 const MAX_CWD_CHARACTERS: usize = 200;
+/// Scrubbed output can be larger than the raw output, because a label can be longer than the
+/// value it replaces. These caps keep the reply well under the 1 MiB IPC frame.
+const MAX_REPLY_STDOUT_BYTES: usize = 640 * 1024;
+const MAX_REPLY_STDERR_BYTES: usize = 128 * 1024;
 
 /// Variable name and value.
 type SandboxEnvironment = Vec<(String, SecretSlice<u8>)>;
@@ -67,8 +72,7 @@ impl SecretsService {
             environment,
             scrubber,
         };
-        let handle = tokio::runtime::Handle::current();
-        let result = tokio::task::block_in_place(|| handle.block_on(run_in_sandbox(request)));
+        let result = run_on_own_thread(request)?;
         match result {
             Ok(output) => {
                 self.mark_used(&names);
@@ -77,11 +81,13 @@ impl SecretsService {
                     output.exit_code, output.timed_out
                 );
                 audit::use_decided(caller, &names, &target, &outcome);
+                let (stdout, stdout_cut) = capped_text(&output.stdout, MAX_REPLY_STDOUT_BYTES);
+                let (stderr, stderr_cut) = capped_text(&output.stderr, MAX_REPLY_STDERR_BYTES);
                 Ok(RunReply::Finished(RunOutput {
                     exit_code: output.exit_code,
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    truncated: output.truncated,
+                    stdout,
+                    stderr,
+                    truncated: output.truncated || stdout_cut || stderr_cut,
                     timed_out: output.timed_out,
                 }))
             }
@@ -122,6 +128,25 @@ impl SecretsService {
         }
         Ok((environment, Arc::new(scrubber)))
     }
+}
+
+/// Runs the sandbox on a thread with its own runtime and waits for it. This works under any
+/// runtime of the caller, and keeps the request loop from taking another request meanwhile.
+fn run_on_own_thread(
+    request: SandboxRequest<'_>,
+) -> Result<Result<secrets_run::SandboxOutput, SandboxError>, ServiceError> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                Ok(runtime.block_on(run_in_sandbox(request)))
+            })
+            .join()
+            .map_err(|_| ServiceError::Sandbox("the sandbox thread failed".into()))?
+            .map_err(|error: std::io::Error| ServiceError::Sandbox(error.to_string()))
+    })
 }
 
 /// `Some(None)` for a template without a working directory, `Some(Some(dir))` for an allowed

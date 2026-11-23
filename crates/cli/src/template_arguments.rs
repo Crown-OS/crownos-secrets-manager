@@ -22,7 +22,7 @@ pub(crate) struct TemplateArguments {
     allow_arguments: bool,
     #[arg(long, default_value_t = 60)]
     timeout_seconds: u32,
-    #[arg(long, default_value_t = 1024 * 1024)]
+    #[arg(long, default_value_t = 256 * 1024)]
     max_output_bytes: u32,
     /// The command and its fixed arguments.
     #[arg(last = true, required = true)]

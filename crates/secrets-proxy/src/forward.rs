@@ -34,7 +34,13 @@ pub(crate) async fn forward(
         ));
     };
     let method = request.method().as_str().to_owned();
-    let path = request.uri().path().to_owned();
+    let path = match crate::target::pin_to_tunnel(&mut request, &authority) {
+        Ok(path) => path,
+        Err(reason) => {
+            audit::request_refused(&session.actor, &authority, reason);
+            return Ok(plain_response(StatusCode::FORBIDDEN, reason));
+        }
+    };
     let injected = match prepare(&session, &authority, &method, &path, request.headers_mut()) {
         Ok(injected) => injected,
         Err(reason) => {

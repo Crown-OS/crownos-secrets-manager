@@ -14,6 +14,7 @@ mod error;
 mod forward;
 mod scrubbed_body;
 mod session;
+mod target;
 mod tunnel;
 mod util;
 

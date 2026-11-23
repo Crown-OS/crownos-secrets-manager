@@ -15,7 +15,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use crownos_ipc::{Pending, ServiceBuilder};
 use crownos_secretsd::{ProcExecutableIdentity, SecretsService};
-use secrets_core::{Binding, SecretKind, SecretName, TemplateName, UseOutcome};
+use secrets_core::{Binding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome};
 use secrets_protocol::secrets::{self, Client, Event};
 use secrets_protocol::{ProxySessionReply, RunReply, error_code, transfer};
 use secrets_vault::{KdfParams, Vault};
@@ -252,6 +252,33 @@ fn no_reply_event_or_log_line_holds_a_value() {
         )
     });
     assert!(request.is_ok());
+    if Path::new("/usr/bin/bwrap").is_file() {
+        let template = RunTemplate {
+            command: vec![
+                "/usr/bin/sh".into(),
+                "-c".into(),
+                r#"echo "$TOKEN"; printf %s "$TOKEN" | base64; echo "$TOKEN" >&2"#.into(),
+            ],
+            environment: [("TOKEN".to_owned(), name("github_token"))].into(),
+            ..RunTemplate::default()
+        };
+        let template_name = TemplateName::parse("echo-token").unwrap();
+        recorder
+            .call(|client| {
+                client.set_template(template_name.clone(), Some(template), password_pipe())
+            })
+            .unwrap();
+        let reply = recorder
+            .call(|client| client.run(template_name, Vec::new(), String::new()))
+            .unwrap();
+        let RunReply::Finished(output) = reply else {
+            panic!("{reply:?}");
+        };
+        assert!(
+            output.stdout.contains("[secret:github_token]"),
+            "{output:?}"
+        );
+    }
     let status = recorder.call(|client| client.status()).unwrap();
     assert_eq!(status.pending_requests.len(), 1);
     assert!(!status.pending_requests[0].purpose.contains('\u{1b}'));
@@ -381,4 +408,61 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
     assert_eq!(refused.code, error_code::UNAUTHORIZED);
     let refused = third.call(|client| client.lock()).unwrap_err();
     assert_eq!(refused.code, error_code::UNAUTHORIZED);
+}
+
+#[test]
+fn a_large_run_output_fits_one_reply() {
+    if !Path::new("/usr/bin/bwrap").is_file() {
+        eprintln!("bwrap is not installed; skipping");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let socket_directory = directory.path().join("runtime");
+    start_daemon(
+        &socket_directory,
+        directory.path().join("secrets.vault"),
+        test_executable(),
+        CapturedLog::default(),
+    );
+    let mut recorder = Recorder {
+        client: Client::connect_in(&socket_directory).unwrap(),
+        seen: String::new(),
+    };
+    let long_name = name(&"n".repeat(64));
+    recorder
+        .call(|client| client.init(password_pipe()))
+        .unwrap();
+    let short_value = transfer::value_pipe(b"zzzz").unwrap();
+    recorder
+        .call(|client| {
+            client.add(
+                long_name.clone(),
+                SecretKind::Token,
+                password_pipe(),
+                short_value,
+            )
+        })
+        .unwrap();
+    recorder
+        .call(|client| client.bind(long_name.clone(), bound_to_this_test(), password_pipe()))
+        .unwrap();
+    let template = RunTemplate {
+        command: vec!["/usr/bin/sh".into(), "-c".into(), "yes zzzz".into()],
+        environment: [("TOKEN".to_owned(), long_name)].into(),
+        max_output_bytes: RunTemplate::MAX_OUTPUT_BYTES,
+        ..RunTemplate::default()
+    };
+    let template_name = TemplateName::parse("loud").unwrap();
+    recorder
+        .call(|client| client.set_template(template_name.clone(), Some(template), password_pipe()))
+        .unwrap();
+    let reply = recorder
+        .call(|client| client.run(template_name, Vec::new(), String::new()))
+        .unwrap();
+    let RunReply::Finished(output) = reply else {
+        panic!("{reply:?}");
+    };
+    assert!(output.truncated);
+    assert!(output.stdout.len() > 500 * 1024, "{}", output.stdout.len());
+    assert!(!output.stdout.contains("zzzz"));
 }

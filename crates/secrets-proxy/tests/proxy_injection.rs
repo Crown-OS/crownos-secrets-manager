@@ -145,6 +145,7 @@ async fn connect(proxy: SocketAddr, token: &str, target: &str) -> (u16, TcpStrea
 async fn request_through(
     stream: TcpStream,
     roots: RootCertStore,
+    host: &str,
     method: &str,
     path: &str,
     key_header: Option<&str>,
@@ -165,7 +166,7 @@ async fn request_through(
     let mut request = Request::builder()
         .method(method)
         .uri(path)
-        .header("host", "localhost");
+        .header("host", host);
     if let Some(key) = key_header {
         request = request.header("x-key", key);
     }
@@ -217,12 +218,13 @@ async fn the_key_reaches_the_bound_host_and_never_the_agent() {
     let (status, echo, body) = request_through(
         stream,
         proxy_roots(&proxy),
+        &target,
         "GET",
         "/v1/echo",
         Some("crown-secret://api"),
     )
     .await;
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "{body}");
     let host_saw = seen.lock().unwrap().last().cloned().unwrap();
     assert_eq!(host_saw.0.as_deref(), Some(&*format!("Bearer {VALUE}")));
     assert_eq!(host_saw.1.as_deref(), Some(VALUE));
@@ -231,8 +233,15 @@ async fn the_key_reaches_the_bound_host_and_never_the_agent() {
     assert_eq!(echo.as_deref(), Some("Bearer [secret:api]"));
 
     let (_, stream) = connect(proxy.address(), &token, &target).await;
-    let (status, _, body) =
-        request_through(stream, proxy_roots(&proxy), "POST", "/v1/echo", None).await;
+    let (status, _, body) = request_through(
+        stream,
+        proxy_roots(&proxy),
+        &target,
+        "POST",
+        "/v1/echo",
+        None,
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(
         seen.lock().unwrap().last().cloned().unwrap().0,
@@ -244,12 +253,54 @@ async fn the_key_reaches_the_bound_host_and_never_the_agent() {
     let (status, _, _) = request_through(
         stream,
         proxy_roots(&proxy),
+        &target,
         "GET",
         "/v2/other",
         Some("crown-secret://api"),
     )
     .await;
     assert_eq!(status, 403);
+
+    let (_, stream) = connect(proxy.address(), &token, &target).await;
+    let other_host = format!("admin.localhost:{port}");
+    let (status, _, _) = request_through(
+        stream,
+        proxy_roots(&proxy),
+        &other_host,
+        "GET",
+        "/v1/echo",
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "another virtual host on the same server");
+    let (_, stream) = connect(proxy.address(), &token, &target).await;
+    let (status, _, _) = request_through(
+        stream,
+        proxy_roots(&proxy),
+        &target,
+        "GET",
+        "/v1/../admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "a dot segment out of the bound path");
+    let before = seen.lock().unwrap().len();
+    let (_, stream) = connect(proxy.address(), &token, &target).await;
+    let (status, _, _) = request_through(
+        stream,
+        proxy_roots(&proxy),
+        &target,
+        "GET",
+        "/v1/%2e%2e/admin",
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "an encoded dot segment");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        before,
+        "a refused request reached the host"
+    );
 
     let (status, _) = connect(proxy.address(), &token, &format!("127.0.0.1:{port}")).await;
     assert_eq!(status, 403);

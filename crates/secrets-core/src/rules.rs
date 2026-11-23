@@ -77,21 +77,26 @@ impl Default for RunTemplate {
             cwd_writable: false,
             allow_arguments: false,
             timeout_seconds: 60,
-            max_output_bytes: 1024 * 1024,
+            max_output_bytes: 256 * 1024,
         }
     }
 }
 
 impl RunTemplate {
+    /// A run blocks the daemon's request loop, so it may last at most this long.
+    pub const MAX_TIMEOUT_SECONDS: u32 = 600;
+    /// The reply must fit in one IPC frame (1 MiB) after scrubbing.
+    pub const MAX_OUTPUT_BYTES: u32 = 512 * 1024;
+
     /// # Errors
     ///
-    /// Fails without a command, without a secret in the environment, or with a zero time or
-    /// output limit.
+    /// Fails without a command, without a secret in the environment, or with a time or output
+    /// limit of zero or above the maximum.
     pub fn validate(&self) -> Result<(), crate::CoreError> {
         if self.command.first().is_none_or(String::is_empty)
             || self.environment.is_empty()
-            || self.timeout_seconds == 0
-            || self.max_output_bytes == 0
+            || !(1..=Self::MAX_TIMEOUT_SECONDS).contains(&self.timeout_seconds)
+            || !(1..=Self::MAX_OUTPUT_BYTES).contains(&self.max_output_bytes)
         {
             return Err(crate::CoreError::InvalidRunTemplate);
         }
