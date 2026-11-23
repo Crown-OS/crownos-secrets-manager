@@ -127,14 +127,34 @@ pub(crate) fn bwrap_options(
 /// bwrap reads its options from standard input and then hands its own sync pipe on as the
 /// command's standard input. A shell in the sandbox puts `/dev/null` there before it runs the
 /// command; the command and the caller's arguments stay separate words, never shell text.
-const STDIN_FROM_DEV_NULL: [&str; 5] = ["--", "/usr/bin/sh", "-c", "exec \"$@\" < /dev/null", "sh"];
+const RUN_WITHOUT_INPUT: &str = "exec \"$@\" < /dev/null";
 
-/// The sandbox prefix, the template command and the caller's arguments.
+/// The same, after a check that the working directory is still the one the daemon checked:
+/// a directory swapped for a link between the check and the bind fails here.
+const RUN_IN_CHECKED_DIRECTORY: &str = "test \"$(/usr/bin/stat -c %d:%i -- .)\" = \"$1\" || { echo 'crownos-secrets: the working directory changed after the check' >&2; exit 125; }; shift; exec \"$@\" < /dev/null";
+
+/// The exit code of a run whose working directory changed after the check.
+pub const DIRECTORY_CHANGED_EXIT_CODE: i32 = 125;
+
+/// bwrap's own arguments after `--args 0`: the shell, then the template command and the
+/// caller's arguments.
 pub(crate) fn command_line<'part>(
     template: &'part RunTemplate,
     arguments: &'part [String],
+    directory_identity: Option<&'part str>,
 ) -> Result<Vec<&'part str>, SandboxError> {
-    let parts: Vec<&str> = STDIN_FROM_DEV_NULL
+    let shell: Vec<&str> = match directory_identity {
+        Some(identity) => vec![
+            "--",
+            "/usr/bin/sh",
+            "-c",
+            RUN_IN_CHECKED_DIRECTORY,
+            "sh",
+            identity,
+        ],
+        None => vec!["--", "/usr/bin/sh", "-c", RUN_WITHOUT_INPUT, "sh"],
+    };
+    let parts: Vec<&str> = shell
         .into_iter()
         .chain(template.command.iter().chain(arguments).map(String::as_str))
         .collect();
@@ -173,7 +193,6 @@ mod tests {
     fn values_go_in_the_options_and_the_command_stays_apart() {
         let template = RunTemplate {
             command: vec!["gh".into(), "pr".into()],
-            allow_arguments: true,
             ..RunTemplate::default()
         };
         let environment = [("GH_TOKEN".to_owned(), SecretSlice::from(b"value".to_vec()))];
@@ -183,7 +202,7 @@ mod tests {
         assert_eq!(parts[setenv - 1], "--setenv");
         assert_eq!(parts[setenv + 1], "value");
         let arguments = ["list".to_owned()];
-        let command = command_line(&template, &arguments).unwrap();
+        let command = command_line(&template, &arguments, None).unwrap();
         assert_eq!(command[command.len() - 3..], ["gh", "pr", "list"]);
         assert_eq!(command[0], "--");
     }
@@ -206,7 +225,7 @@ mod tests {
         ));
         let arguments = ["a\0".to_owned()];
         assert!(matches!(
-            command_line(&template, &arguments),
+            command_line(&template, &arguments, None),
             Err(SandboxError::ArgumentWithNul)
         ));
     }

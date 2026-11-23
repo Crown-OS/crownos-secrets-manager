@@ -20,9 +20,11 @@ use crate::Caller;
 use crate::util::rate::RateLimiter;
 
 pub use error::ServiceError;
+pub use run_calls::{RunJob, RunStart};
 
 const MAX_PENDING_REQUESTS: usize = 64;
 const MAX_PENDING_REQUESTS_PER_CALLER: usize = 4;
+const DEFAULT_CONCURRENT_RUNS: usize = 3;
 
 pub struct SecretsService {
     vault: Vault,
@@ -39,7 +41,9 @@ pub struct SecretsService {
     /// The bound hosts that the CA of the running proxy covers.
     proxy_ca_hosts: Option<String>,
     next_session_id: u64,
-    bwrap: PathBuf,
+    launcher: secrets_run::Launcher,
+    run_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    protected_directories: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for SecretsService {
@@ -64,19 +68,28 @@ impl SecretsService {
             next_request_id: 1,
             last_used: HashMap::new(),
             events: Vec::new(),
-            data_directory,
             upstream_roots: None,
             proxy: None,
             proxy_ca_hosts: None,
             next_session_id: 1,
-            bwrap: PathBuf::from(secrets_run::BWRAP),
+            launcher: secrets_run::Launcher::default(),
+            run_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(DEFAULT_CONCURRENT_RUNS)),
+            protected_directories: run_calls::protected_directories(&data_directory),
+            data_directory,
         }
     }
 
-    /// The bubblewrap that run templates use; `/usr/bin/bwrap` when not set.
+    /// The programs that start runs; the installed ones when not set.
     #[must_use]
-    pub fn with_bwrap(mut self, bwrap: PathBuf) -> Self {
-        self.bwrap = bwrap;
+    pub fn with_launcher(mut self, launcher: secrets_run::Launcher) -> Self {
+        self.launcher = launcher;
+        self
+    }
+
+    /// How many runs may go on at the same time; 3 when not set.
+    #[must_use]
+    pub fn with_concurrent_runs(mut self, runs: usize) -> Self {
+        self.run_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(runs));
         self
     }
 

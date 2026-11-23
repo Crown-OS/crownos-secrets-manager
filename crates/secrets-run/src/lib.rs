@@ -1,18 +1,21 @@
-//! Runs a registered command template in bubblewrap.
+//! Runs a registered command template in bubblewrap, inside a transient service of the user
+//! manager.
 //!
-//! The sandbox has its own pid, ipc and uts namespaces, a read-only `/usr` and `/etc`, a private
+//! `systemd-run --user --pipe --wait` starts the sandbox with its own memory limit and run time,
+//! outside the daemon's cgroup, so the daemon keeps its strict system call filter. The sandbox
+//! has its own pid, ipc, uts and cgroup namespaces, a read-only `/usr` and `/etc`, a private
 //! `/tmp`, and no network unless the template names hosts. bwrap reads its options, the secret
-//! values among them, from a pipe on its standard input (`--args 0`), so no value shows in
-//! `/proc/<pid>/cmdline`. A pipe, not an inherited file, keeps the values of one run away from
-//! the commands of another run that starts at the same time. The command reads `/dev/null` as its
-//! standard input. stdout and stderr go through the scrubber as they stream, with a time
-//! limit and an output limit.
+//! values among them, from standard input (`--args 0`), which `--pipe` hands on; so no value is in
+//! a command line, in the environment of `systemd-run`, or in the journal. The command reads
+//! `/dev/null` as its standard input. stdout and stderr go through the scrubber as they stream,
+//! with a time limit and an output limit.
 
 mod arguments;
+mod directory;
 mod error;
+mod launcher;
 mod output;
 
-use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,17 +25,17 @@ use secrets_core::{RunTemplate, Scrubber};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
+pub use arguments::DIRECTORY_CHANGED_EXIT_CODE;
+pub use directory::CheckedDirectory;
 pub use error::SandboxError;
-
-/// The installed bubblewrap.
-pub const BWRAP: &str = "/usr/bin/bwrap";
+pub use launcher::Launcher;
 
 pub struct SandboxRequest<'request> {
-    pub bwrap: &'request Path,
+    pub launcher: &'request Launcher,
     pub template: &'request RunTemplate,
     pub arguments: &'request [String],
-    /// A checked, canonical directory, or `None` for an empty temporary one.
-    pub cwd: Option<&'request Path>,
+    /// `None` runs the command in an empty temporary directory.
+    pub cwd: Option<&'request CheckedDirectory>,
     /// Variable name and value, from the vault.
     pub environment: Vec<(String, SecretSlice<u8>)>,
     pub scrubber: Arc<Scrubber>,
@@ -51,7 +54,7 @@ impl std::fmt::Debug for SandboxRequest<'_> {
 /// What the command printed, scrubbed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxOutput {
-    /// `None` when a signal ended the command.
+    /// The exit code that `systemd-run` passes on; `None` when the run was stopped.
     pub exit_code: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -61,18 +64,33 @@ pub struct SandboxOutput {
 
 /// # Errors
 ///
-/// [`SandboxError::SandboxMissing`] without bwrap, and an error for a bad variable name, a value
-/// or argument with a NUL byte, or a failed start.
+/// [`SandboxError::SandboxMissing`] without bwrap or systemd-run, and an error for a bad
+/// variable name, a value or argument with a NUL byte, or a failed start.
 pub async fn run_in_sandbox(request: SandboxRequest<'_>) -> Result<SandboxOutput, SandboxError> {
-    if !request.bwrap.is_file() {
+    let launcher = request.launcher;
+    if !launcher.bwrap.is_file() || !launcher.systemd_run.is_file() {
         return Err(SandboxError::SandboxMissing);
     }
-    let options = arguments::bwrap_options(request.template, request.cwd, &request.environment)?;
-    let command_line = arguments::command_line(request.template, request.arguments)?;
-    let mut child = Command::new(request.bwrap)
-        .args(["--args", "0"])
+    let options = arguments::bwrap_options(
+        request.template,
+        request.cwd.map(CheckedDirectory::path),
+        &request.environment,
+    )?;
+    let command_line = arguments::command_line(
+        request.template,
+        request.arguments,
+        request.cwd.map(CheckedDirectory::identity),
+    )?;
+    let unit = launcher::unit_name()?;
+    let mut child = Command::new(&launcher.systemd_run)
+        .args(launcher::systemd_run_arguments(
+            launcher,
+            request.template,
+            &unit,
+        ))
         .args(command_line)
         .env_clear()
+        .envs(launcher::user_manager_environment())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -84,5 +102,9 @@ pub async fn run_in_sandbox(request: SandboxRequest<'_>) -> Result<SandboxOutput
     drop(options);
     let limit = Duration::from_secs(u64::from(request.template.timeout_seconds));
     let max_output = usize::try_from(request.template.max_output_bytes).unwrap_or(usize::MAX);
-    output::collect(&mut child, &request.scrubber, limit, max_output).await
+    let output = output::collect(&mut child, &request.scrubber, limit, max_output).await?;
+    if output.exit_code.is_none() {
+        launcher::stop(launcher, &unit).await;
+    }
+    Ok(output)
 }

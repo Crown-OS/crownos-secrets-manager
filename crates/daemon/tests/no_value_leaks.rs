@@ -16,7 +16,7 @@ use base64::Engine as _;
 use crownos_ipc::{Pending, ServiceBuilder};
 use crownos_secretsd::{ProcExecutableIdentity, SecretsService};
 use secrets_core::{
-    Binding, Confirm, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome,
+    Binding, Confirm, HttpBinding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome,
 };
 use secrets_protocol::secrets::{self, Client, Event};
 use secrets_protocol::{ProxySessionReply, RunReply, error_code, transfer};
@@ -62,7 +62,13 @@ fn value_pipe() -> std::os::fd::OwnedFd {
 }
 
 /// Starts a daemon on its own thread, serving in `socket_directory`.
-fn start_daemon(socket_directory: &Path, vault_path: PathBuf, admin: String, log: CapturedLog) {
+fn start_daemon(
+    socket_directory: &Path,
+    vault_path: PathBuf,
+    admin: String,
+    log: CapturedLog,
+    concurrent_runs: usize,
+) {
     let mut server = ServiceBuilder::new(secrets::SERVICE)
         .directory(socket_directory)
         .build()
@@ -80,7 +86,9 @@ fn start_daemon(socket_directory: &Path, vault_path: PathBuf, admin: String, log
             iterations: 1,
             parallelism: 1,
         });
-        let service = SecretsService::new(vault, vec![admin], data_directory);
+        let service = SecretsService::new(vault, vec![admin], data_directory)
+            .with_concurrent_runs(concurrent_runs)
+            .with_upstream_roots(rustls::RootCertStore::empty());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -153,6 +161,19 @@ fn bound_to_this_test() -> Binding {
     }
 }
 
+fn bound_with_http() -> Binding {
+    Binding {
+        http: vec![HttpBinding {
+            host: "api.example.com".into(),
+            header: "Authorization".into(),
+            format: "Bearer {value}".into(),
+            methods: Vec::new(),
+            paths: Vec::new(),
+        }],
+        ..bound_to_this_test()
+    }
+}
+
 #[test]
 fn no_reply_event_or_log_line_holds_a_value() {
     let directory = tempfile::tempdir().unwrap();
@@ -164,6 +185,7 @@ fn no_reply_event_or_log_line_holds_a_value() {
         vault_path.clone(),
         test_executable(),
         log.clone(),
+        3,
     );
 
     let mut recorder = Recorder {
@@ -200,7 +222,7 @@ fn no_reply_event_or_log_line_holds_a_value() {
         })
         .unwrap();
     recorder
-        .call(|client| client.bind(name("github_token"), bound_to_this_test(), password_pipe()))
+        .call(|client| client.bind(name("github_token"), bound_with_http(), password_pipe()))
         .unwrap();
     recorder
         .call(|client| {
@@ -282,6 +304,13 @@ fn no_reply_event_or_log_line_holds_a_value() {
             "{output:?}"
         );
     }
+    let session = recorder
+        .call(|client| client.proxy_session(vec![name("github_token")], 5))
+        .unwrap();
+    assert!(
+        matches!(session, ProxySessionReply::Started(_)),
+        "{session:?}"
+    );
     let status = recorder.call(|client| client.status()).unwrap();
     assert_eq!(status.pending_requests.len(), 1);
     assert!(!status.pending_requests[0].purpose.contains('\u{1b}'));
@@ -323,6 +352,7 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
         vault_path.clone(),
         test_executable(),
         CapturedLog::default(),
+        3,
     );
     let mut first = Recorder {
         client: Client::connect_in(&first_socket).unwrap(),
@@ -362,6 +392,7 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
         vault_path.clone(),
         test_executable(),
         CapturedLog::default(),
+        3,
     );
     let mut second = Recorder {
         client: Client::connect_in(&second_socket).unwrap(),
@@ -393,6 +424,7 @@ fn rules_survive_a_restart_and_only_admins_change_them() {
         vault_path,
         "/usr/bin/crownos-secrets".into(),
         CapturedLog::default(),
+        3,
     );
     let mut third = Recorder {
         client: Client::connect_in(&third_socket).unwrap(),
@@ -426,6 +458,7 @@ fn a_large_run_output_fits_one_reply() {
         directory.path().join("secrets.vault"),
         test_executable(),
         CapturedLog::default(),
+        3,
     );
     let mut recorder = Recorder {
         client: Client::connect_in(&socket_directory).unwrap(),
@@ -468,4 +501,81 @@ fn a_large_run_output_fits_one_reply() {
     assert!(output.truncated);
     assert!(output.stdout.len() > 500 * 1024, "{}", output.stdout.len());
     assert!(!output.stdout.contains("zzzz"));
+}
+
+#[test]
+fn runs_answer_later_and_a_run_over_the_limit_is_refused() {
+    if !Path::new("/usr/bin/bwrap").is_file() || !Path::new("/usr/bin/systemd-run").is_file() {
+        eprintln!("bwrap or systemd-run is missing; skipping");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let socket_directory = directory.path().join("runtime");
+    start_daemon(
+        &socket_directory,
+        directory.path().join("secrets.vault"),
+        test_executable(),
+        CapturedLog::default(),
+        2,
+    );
+    let connect = || Recorder {
+        client: Client::connect_in(&socket_directory).unwrap(),
+        seen: String::new(),
+    };
+    let mut admin = connect();
+    admin.call(|client| client.init(password_pipe())).unwrap();
+    admin
+        .call(|client| {
+            client.add(
+                name("token"),
+                SecretKind::Token,
+                password_pipe(),
+                value_pipe(),
+            )
+        })
+        .unwrap();
+    admin
+        .call(|client| client.bind(name("token"), bound_to_this_test(), password_pipe()))
+        .unwrap();
+    let template = RunTemplate {
+        command: vec!["/usr/bin/sleep".into(), "2".into()],
+        environment: [("TOKEN".to_owned(), name("token"))].into(),
+        ..RunTemplate::default()
+    };
+    let nap = TemplateName::parse("nap").unwrap();
+    admin
+        .call(|client| client.set_template(nap.clone(), Some(template), password_pipe()))
+        .unwrap();
+
+    let mut runners: Vec<Recorder> = (0..3).map(|_| connect()).collect();
+    let pending: Vec<_> = runners
+        .iter_mut()
+        .map(|runner| {
+            runner
+                .client
+                .run(nap.clone(), Vec::new(), String::new())
+                .unwrap()
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let asked = std::time::Instant::now();
+    admin.call(|client| client.status()).unwrap();
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "a run held up the request loop"
+    );
+    let replies: Vec<RunReply> = runners
+        .iter_mut()
+        .zip(pending)
+        .map(|(runner, pending)| runner.client.wait(pending, TIMEOUT).unwrap())
+        .collect();
+    let finished = replies
+        .iter()
+        .filter(|reply| matches!(reply, RunReply::Finished(output) if output.exit_code == Some(0)))
+        .count();
+    let refused = replies
+        .iter()
+        .filter(|reply| **reply == RunReply::TooManyRuns)
+        .count();
+    assert_eq!((finished, refused), (2, 1), "{replies:?}");
 }

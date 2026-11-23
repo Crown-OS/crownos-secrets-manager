@@ -20,7 +20,9 @@ pub use error::CoreError;
 pub use kind::SecretKind;
 pub use name::{MAX_NAME_LENGTH, SecretName, TemplateName};
 pub use outcome::UseOutcome;
-pub use rules::{RateLimitPolicy, RunTemplate, SecretEntry, SecretRules, VaultSettings};
+pub use rules::{
+    ArgumentRefusal, RateLimitPolicy, RunTemplate, SecretEntry, SecretRules, VaultSettings,
+};
 pub use scrub::{ScrubStream, Scrubber};
 pub use util::wildcard::wildcard_matches;
 

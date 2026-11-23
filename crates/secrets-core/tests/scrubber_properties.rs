@@ -28,11 +28,31 @@ fn scrub_in_chunks(scrubber: &Scrubber, input: &[u8], chunk_lengths: &[usize]) -
     output
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+fn plain_contains(haystack: &[u8], needle: &[u8]) -> bool {
     needle.is_empty()
         || haystack
             .windows(needle.len())
             .any(|window| window == needle)
+}
+
+const LABEL: &[u8] = b"[secret:planted]";
+
+/// Whether `needle` is in `haystack` outside the labels: a label such as `[secret:...]` can hold
+/// a short value, for example `ec`, by chance.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    let mut rest = haystack;
+    loop {
+        match rest.windows(LABEL.len()).position(|window| window == LABEL) {
+            Some(start) => {
+                let (before, after) = rest.split_at(start);
+                if plain_contains(before, needle) {
+                    return true;
+                }
+                rest = after.get(LABEL.len()..).unwrap_or_default();
+            }
+            None => return plain_contains(rest, needle),
+        }
+    }
 }
 
 fn value_strategy() -> impl Strategy<Value = Vec<u8>> {
@@ -80,7 +100,7 @@ proptest! {
         let input = [prefix.as_slice(), &value, &suffix].concat();
         let output = scrub_in_chunks(&scrubber, &input, &chunks);
         prop_assert!(!contains(&output, &value));
-        prop_assert!(contains(&output, b"[secret:planted]"));
+        prop_assert!(plain_contains(&output, LABEL));
     }
 
     #[test]
@@ -156,7 +176,7 @@ proptest! {
         let escaped = &quoted[1..quoted.len() - 1];
         let output = scrub_in_chunks(&scrubber, document.as_bytes(), &chunks);
         prop_assert!(!contains(&output, escaped.as_bytes()));
-        prop_assert!(contains(&output, b"[secret:planted]"));
+        prop_assert!(plain_contains(&output, LABEL));
     }
 }
 

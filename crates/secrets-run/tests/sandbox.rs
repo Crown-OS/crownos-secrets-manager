@@ -6,20 +6,28 @@
     clippy::indexing_slicing
 )]
 
-use std::path::Path;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use secrecy::SecretSlice;
 use secrets_core::{RunTemplate, Scrubber, SecretName};
-use secrets_run::{BWRAP, SandboxError, SandboxOutput, SandboxRequest, run_in_sandbox};
+use secrets_run::{
+    CheckedDirectory, DIRECTORY_CHANGED_EXIT_CODE, Launcher, SandboxError, SandboxOutput,
+    SandboxRequest, run_in_sandbox,
+};
 
 const VALUE: &str = "ghp_PLANTED_run_value_0123456789";
 
+/// bwrap, systemd-run and a running user manager.
 fn bwrap_installed() -> bool {
-    let installed = Path::new(BWRAP).is_file();
+    let launcher = Launcher::default();
+    let manager = std::process::Command::new(&launcher.systemctl)
+        .args(["--user", "is-system-running"])
+        .output()
+        .is_ok_and(|output| !output.stdout.is_empty());
+    let installed = launcher.bwrap.is_file() && launcher.systemd_run.is_file() && manager;
     if !installed {
-        eprintln!("bwrap is not installed; skipping");
+        eprintln!("bwrap, systemd-run or the user manager is missing; skipping");
     }
     installed
 }
@@ -33,11 +41,14 @@ fn shell_template(script: &str) -> RunTemplate {
     }
 }
 
-async fn run(template: &RunTemplate, cwd: Option<&Path>) -> Result<SandboxOutput, SandboxError> {
+async fn run(
+    template: &RunTemplate,
+    cwd: Option<&CheckedDirectory>,
+) -> Result<SandboxOutput, SandboxError> {
     let mut scrubber = Scrubber::new();
     scrubber.add_secret(&SecretName::parse("planted").unwrap(), VALUE.as_bytes());
     run_in_sandbox(SandboxRequest {
-        bwrap: Path::new(BWRAP),
+        launcher: &Launcher::default(),
         template,
         arguments: &[],
         cwd,
@@ -93,13 +104,14 @@ async fn there_is_no_network_and_the_cwd_is_read_only() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    let cwd = directory.path().canonicalize().unwrap();
+    let checked = CheckedDirectory::check(directory.path()).unwrap();
+    let cwd = checked.path().to_owned();
     let script = r#"for interface in $(tail -n +3 /proc/net/dev | cut -d: -f1); do echo "interface:$interface"; done
 for descriptor in /proc/self/fd/*; do echo "fd:$(readlink "$descriptor")"; done
 echo "stdin-bytes:$(wc -c < /dev/stdin 2>/dev/null)"
 pwd
 touch written 2>/dev/null && echo wrote || echo read-only"#;
-    let output = run(&shell_template(script), Some(&cwd)).await.unwrap();
+    let output = run(&shell_template(script), Some(&checked)).await.unwrap();
     let stdout = text(&output.stdout);
     let interfaces: Vec<&str> = stdout
         .lines()
@@ -142,8 +154,12 @@ async fn time_and_output_limits_stop_the_command() {
 #[tokio::test]
 async fn a_missing_bwrap_is_reported() {
     let template = shell_template("true");
+    let launcher = Launcher {
+        bwrap: "/nonexistent/bwrap".into(),
+        ..Launcher::default()
+    };
     let result = run_in_sandbox(SandboxRequest {
-        bwrap: Path::new("/nonexistent/bwrap"),
+        launcher: &launcher,
         template: &template,
         arguments: &[],
         cwd: None,
@@ -152,4 +168,56 @@ async fn a_missing_bwrap_is_reported() {
     })
     .await;
     assert!(matches!(result, Err(SandboxError::SandboxMissing)));
+}
+
+#[tokio::test]
+async fn a_command_over_its_memory_limit_is_stopped() {
+    if !bwrap_installed() {
+        return;
+    }
+    let mut hungry =
+        shell_template("big=$(head -c 200000000 /dev/zero | tr '\\0' a); echo ${#big}");
+    hungry.memory_max_megabytes = 32;
+    hungry.timeout_seconds = 30;
+    let output = run(&hungry, None).await.unwrap();
+    assert_ne!(output.exit_code, Some(0), "{output:?}");
+    assert!(!text(&output.stdout).contains("200000000"), "{output:?}");
+}
+
+#[tokio::test]
+async fn a_directory_swapped_after_the_check_stops_the_run() {
+    if !bwrap_installed() {
+        return;
+    }
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let swapped = CheckedDirectory::check(first.path())
+        .unwrap()
+        .with_identity_of(&CheckedDirectory::check(second.path()).unwrap());
+    let output = run(&shell_template("echo ran"), Some(&swapped))
+        .await
+        .unwrap();
+    assert_eq!(
+        output.exit_code,
+        Some(DIRECTORY_CHANGED_EXIT_CODE),
+        "{output:?}"
+    );
+    assert!(!text(&output.stdout).contains("ran"));
+    assert!(text(&output.stderr).contains("working directory changed"));
+}
+
+#[tokio::test]
+async fn no_value_reaches_the_journal() {
+    if !bwrap_installed() {
+        return;
+    }
+    let output = run(&shell_template(r#"echo "$SECRET""#), None)
+        .await
+        .unwrap();
+    assert_eq!(output.exit_code, Some(0), "{output:?}");
+    let journal = std::process::Command::new("journalctl")
+        .args(["--user", "--since=-5min", "--output=cat", "--no-pager"])
+        .output()
+        .unwrap();
+    assert!(!text(&journal.stdout).contains(VALUE));
 }

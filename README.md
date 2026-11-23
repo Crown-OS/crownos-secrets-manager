@@ -50,7 +50,7 @@ crownos-secrets bind github_token \
     --http-host api.github.com --http-header Authorization --http-format 'Bearer {value}' \
     --http-method GET --http-path '/repos/*'
 crownos-secrets template-set gh-prs --env GH_TOKEN=github_token --host api.github.com \
-    --cwd-glob "$HOME/code/*" -- gh pr list
+    --cwd-glob "$HOME/code/*" --argument-pattern '[0-9]+' -- gh pr view
 crownos-secrets configure --lock-after-minutes 30 --uses-per-minute 10
 crownos-secrets list
 crownos-secrets templates
@@ -237,43 +237,61 @@ Limits: a value that the host echoes in an encoding that the scrubber does not k
 
 `secrets_run` (the `run` call) starts a template that the user registered with
 `crownos-secrets template-set`. A template has a command, the environment variables that it gets
-from secrets (at least one), the hosts it needs, a `cwd_glob`, and limits. The daemon refuses:
+from secrets (at least one), the hosts it needs, a `cwd_glob`, argument patterns, and limits. The
+daemon refuses:
 
-- a template that does not exist (`Unknown`), or a caller that a secret's binding does not name
-  (`Denied`)
-- extra arguments, unless `allow_arguments` is set
-- a working directory that does not match `cwd_glob`. The check uses the canonical path, so `..`
-  and symbolic links cannot leave the pattern. Without a `cwd_glob`, the command runs in an empty
+- a template that does not exist (`Unknown`), a caller that a secret's binding does not name
+  (`Denied`), or a binding that asks for a confirmation (`NeedsConfirmation`)
+- extra arguments beyond the template's `argument_patterns`: one regular expression for each
+  position, which must match the whole argument. Without patterns, no extra argument passes. An
+  argument that starts with `-` is refused unless `allow_option_arguments` is set, so a caller
+  cannot add an option such as `--output` or `--upload-file`.
+- a working directory that does not match `cwd_glob`, or that is inside the daemon's data
+  directory or a runtime directory. The check uses the canonical path, so `..` and symbolic
+  links cannot leave the pattern. The daemon also notes the device and inode of the directory;
+  the shell in the sandbox compares them again and stops the run (`CwdChanged`) when the
+  directory was swapped after the check. Without a `cwd_glob`, the command runs in an empty
   `/tmp` and the caller gives no directory.
-- any run when `/usr/bin/bwrap` is not installed (`SandboxMissing`)
+- a fourth run while three go on (`TooManyRuns`)
+- any run when `bwrap` or `systemd-run` is not installed (`SandboxMissing`)
 
-The sandbox is bubblewrap with:
+The daemon does not start the sandbox itself. It runs
+`systemd-run --user --pipe --wait --collect` with a unit name of its own and the properties
+`MemoryMax=` (`memory_max_megabytes`, 16 to 4096), `MemorySwapMax=0`, `RuntimeMaxSec=`,
+`TasksMax=256`, `LimitCORE=0` and `NoNewPrivileges=yes`. So the command has its own cgroup: a
+command over its memory limit is stopped alone, and the daemon keeps its strict unit. bwrap in
+that service makes the sandbox:
 
 - new pid, ipc, uts and cgroup namespaces, `--die-with-parent` and `--new-session`
 - a read-only `/usr` and `/etc`, a new `/proc`, `/dev` and `/tmp`, and nothing of your home
   except the working directory (read-only unless `cwd_writable`)
 - no network when the template names no hosts (`--unshare-net`). When it names hosts, the command
-  shares the full network of the daemon: the host list is not an allow list yet. A template with
-  hosts and `allow_arguments` lets the caller send a value to any host, so register such a
-  template only for a command that you trust with the caller's arguments.
+  shares the full network of the user: the host list is not an allow list yet.
 - an empty environment except `PATH`, `HOME=/tmp`, `LANG` and the template variables
 - `/usr/bin/sh` in the sandbox (it puts `/dev/null` on standard input)
 
-bwrap reads its options, with the values, from a pipe on its standard input (`--args 0`), so no
-value shows in `/proc/<pid>/cmdline`. A pipe, not an inherited file, keeps the values of one run
-away from a command of another run. A shell in the sandbox gives the command `/dev/null` as its
-standard input; the command and the arguments stay separate words, not shell text. The command
-itself gets the values in its environment, so a process of your user can read them from
-`/proc/<pid>/environ` while it runs.
+bwrap reads its options, with the values, from its standard input (`--args 0`); `--pipe` hands
+the daemon's pipe to it. So no value is in a command line, in the environment of `systemd-run`
+(which gets only the address of the user bus), or in the journal (the output goes to the pipes).
+The command itself gets the values in its environment, so a process of your user can read them
+from `/proc/<pid>/environ` while it runs.
 
 stdout and stderr go through a scrubber with every value in the vault, as they stream. A run stops
 at `timeout_seconds` (at most 600) and at `max_output_bytes` (at most 512 KiB), and the reply
 says so. The scrubbed text in the reply is cut to 640 KiB of stdout and 128 KiB of stderr, so it
-fits one IPC frame. While a run goes on, the daemon answers no other request, and the vault does
-not lock on time until the run ends.
+fits one IPC frame. The checks run at once; the run itself goes on in a task, and its reply comes
+when it ends, so other requests are answered meanwhile. A run that started keeps its copies of
+the values until it ends, also when the vault locks.
 
-The sandboxed command is in the cgroup of the daemon, so `MemoryMax=384M` and `MemorySwapMax=0`
-also apply to it. A command that uses too much memory can make the kernel stop the daemon too.
+Register templates with care:
+
+- With a writable working directory, a command can leave a value in a file that a later read
+  shows, or change files that a later run executes.
+- A command that transforms its input can print a value in a form that the scrubber does not
+  know: `rev`, `tr`, `xxd -p -c1`, `base32`, `gzip`, a script that prints each character on its
+  own line. Register only commands whose output does not depend on the values in such a way.
+- A template with hosts and argument patterns that permit a URL or a host lets the caller send a
+  value to that place.
 
 ## Hardening
 
@@ -288,10 +306,10 @@ also apply to it. A command that uses too much memory can make the kernel stop t
   `mlock` works on full pages, and a page can hold other data too. When `RLIMIT_MEMLOCK` stops a
   lock, the daemon logs this one time.
 - The user unit sets `LimitCORE=0`, `MemorySwapMax=0`, `MemoryMax=384M`, `NoNewPrivileges=yes`,
-  `UMask=0077`, `LockPersonality=yes`, `SystemCallArchitectures=native` and limits on address
-  families (Unix, IP for the proxy, netlink for bwrap), namespaces (only those that bwrap makes)
-  and system calls (`@system-service @mount`). `MemoryDenyWriteExecute=` stays off, because
-  sandboxed commands get it too and JIT runtimes need it off.
+  `UMask=0077`, `LockPersonality=yes`, `MemoryDenyWriteExecute=yes`, `RestrictNamespaces=yes`,
+  `SystemCallArchitectures=native`, `SystemCallFilter=@system-service` and
+  `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` (IP for the proxy). Run templates do not
+  inherit these limits, because the user manager starts them.
 - The unit does not use `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=` or `ReadWritePaths=`. In a
   user unit, each of these puts the daemon in a new user namespace. Reading `/proc/<pid>/exe` of a
   caller is a ptrace-read check, and the kernel refuses it across user namespaces. Also, your user
@@ -336,8 +354,8 @@ Use the Claude Code sandbox with `failIfUnavailable` to make an agent shell less
 - The daemon keeps `last_used` in memory only.
 - Open requests do not expire. Because all MCP agents share one identity, four open requests
   block `request` for every agent until the user answers them with `add`.
-- The sandbox tests skip when bwrap is missing, but fail where unprivileged user namespaces are
-  off.
+- The sandbox tests skip when bwrap, systemd-run or the user manager is missing, but fail where
+  unprivileged user namespaces are off.
 - `rpassword` reads the prompt into a `String` that can grow. A grown buffer is not zeroed.
 - TODO: seal the vault key with `systemd-creds --user` (and TPM2 when present), so the vault can
   unlock at login without a typed master password.
@@ -369,7 +387,9 @@ not find these:
 - double encoding, for example base64 of hex, or percent encoding of base64
 - a part of a value, or a value that overlaps a second secret in a way that the first match hides
 - a label as an equality oracle: a program can print a guess and see whether the output shows
-  `[secret:<name>]`, so it can test guesses. Rate limits slow this; they do not stop it.
+  `[secret:<name>]`, so it can test guesses. Rate limits slow this; they do not stop it. Do not
+  store a low-entropy secret (a short PIN, a dictionary word) for agent use: a few guesses find
+  it. A very short value can also appear inside a label by chance.
 
 ## Plan
 

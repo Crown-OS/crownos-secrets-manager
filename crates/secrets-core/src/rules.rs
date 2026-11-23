@@ -61,10 +61,24 @@ pub struct RunTemplate {
     /// runs in an empty temporary directory.
     pub cwd_glob: String,
     pub cwd_writable: bool,
-    /// Whether the caller may add arguments after `command`.
-    pub allow_arguments: bool,
+    /// One regular expression for each argument that a caller may add after `command`; each
+    /// must match its whole argument. Empty: no extra arguments.
+    pub argument_patterns: Vec<String>,
+    /// Whether an extra argument may start with `-`. Off, an option such as `--output` cannot
+    /// steer the command.
+    pub allow_option_arguments: bool,
     pub timeout_seconds: u32,
     pub max_output_bytes: u32,
+    /// The memory limit of the transient service that runs the sandbox.
+    pub memory_max_megabytes: u32,
+}
+
+/// Why the extra arguments of a run were refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentRefusal {
+    TooMany,
+    StartsWithDash,
+    NoMatch,
 }
 
 impl Default for RunTemplate {
@@ -75,9 +89,11 @@ impl Default for RunTemplate {
             network: Vec::new(),
             cwd_glob: String::new(),
             cwd_writable: false,
-            allow_arguments: false,
+            argument_patterns: Vec::new(),
+            allow_option_arguments: false,
             timeout_seconds: 60,
             max_output_bytes: 256 * 1024,
+            memory_max_megabytes: 256,
         }
     }
 }
@@ -87,6 +103,8 @@ impl RunTemplate {
     pub const MAX_TIMEOUT_SECONDS: u32 = 600;
     /// The reply must fit in one IPC frame (1 MiB) after scrubbing.
     pub const MAX_OUTPUT_BYTES: u32 = 512 * 1024;
+    pub const MEMORY_MEGABYTES: std::ops::RangeInclusive<u32> = 16..=4096;
+    const MAX_PATTERN_LENGTH: usize = 256;
 
     /// # Errors
     ///
@@ -97,8 +115,33 @@ impl RunTemplate {
             || self.environment.is_empty()
             || !(1..=Self::MAX_TIMEOUT_SECONDS).contains(&self.timeout_seconds)
             || !(1..=Self::MAX_OUTPUT_BYTES).contains(&self.max_output_bytes)
+            || !Self::MEMORY_MEGABYTES.contains(&self.memory_max_megabytes)
+            || self.argument_patterns.iter().any(|pattern| {
+                pattern.len() > Self::MAX_PATTERN_LENGTH || whole_match(pattern).is_err()
+            })
         {
             return Err(crate::CoreError::InvalidRunTemplate);
+        }
+        Ok(())
+    }
+
+    /// Checks the extra arguments of a run against the patterns, position by position.
+    ///
+    /// # Errors
+    ///
+    /// The first reason to refuse them.
+    pub fn check_arguments(&self, arguments: &[String]) -> Result<(), ArgumentRefusal> {
+        if arguments.len() > self.argument_patterns.len() {
+            return Err(ArgumentRefusal::TooMany);
+        }
+        for (argument, pattern) in arguments.iter().zip(&self.argument_patterns) {
+            if argument.starts_with('-') && !self.allow_option_arguments {
+                return Err(ArgumentRefusal::StartsWithDash);
+            }
+            let matches = whole_match(pattern).is_ok_and(|pattern| pattern.is_match(argument));
+            if !matches {
+                return Err(ArgumentRefusal::NoMatch);
+            }
         }
         Ok(())
     }
@@ -117,4 +160,63 @@ pub struct SecretRules {
     pub settings: VaultSettings,
     pub secrets: BTreeMap<SecretName, SecretEntry>,
     pub run_templates: BTreeMap<TemplateName, RunTemplate>,
+}
+
+fn whole_match(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    regex::Regex::new(&format!("^(?:{pattern})$"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn template(patterns: &[&str]) -> RunTemplate {
+        RunTemplate {
+            argument_patterns: patterns
+                .iter()
+                .map(|pattern| (*pattern).to_owned())
+                .collect(),
+            ..RunTemplate::default()
+        }
+    }
+
+    #[test]
+    fn arguments_match_their_pattern_whole_and_options_need_a_flag() {
+        let template = template(&["[0-9]+", "open|closed"]);
+        let arguments = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            template.check_arguments(&arguments(&["42", "open"])),
+            Ok(())
+        );
+        assert_eq!(template.check_arguments(&arguments(&["42"])), Ok(()));
+        assert_eq!(
+            template.check_arguments(&arguments(&["42", "open", "x"])),
+            Err(ArgumentRefusal::TooMany)
+        );
+        assert_eq!(
+            template.check_arguments(&arguments(&["42x"])),
+            Err(ArgumentRefusal::NoMatch)
+        );
+        assert_eq!(
+            template.check_arguments(&arguments(&["42", "open\nclosed"])),
+            Err(ArgumentRefusal::NoMatch)
+        );
+        let any = RunTemplate {
+            argument_patterns: vec![".*".into()],
+            ..RunTemplate::default()
+        };
+        assert_eq!(
+            any.check_arguments(&arguments(&["--output=/tmp/x"])),
+            Err(ArgumentRefusal::StartsWithDash)
+        );
+        assert_eq!(
+            RunTemplate::default().check_arguments(&arguments(&["x"])),
+            Err(ArgumentRefusal::TooMany)
+        );
+    }
 }

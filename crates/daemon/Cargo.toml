@@ -24,13 +24,15 @@ crownos-ipc = { workspace = true, features = ["tokio"] }
 dirs = { workspace = true }
 rustix = { workspace = true }
 secrecy = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "signal", "time", "process", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
+secrets-run = { workspace = true }
 serde = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "net"] }

@@ -69,7 +69,11 @@ pub enum RunReply {
     Finished(RunOutput),
     Refused(UseOutcome),
     CwdNotAllowed,
+    /// The working directory changed between the check and the start.
+    CwdChanged,
     ArgumentsNotAllowed,
+    /// The most runs at the same time already go on.
+    TooManyRuns,
     /// `bwrap` is not installed, so nothing runs.
     SandboxMissing,
 }

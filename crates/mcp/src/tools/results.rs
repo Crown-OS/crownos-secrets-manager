@@ -65,7 +65,13 @@ pub(crate) fn run_result(reply: RunReply) -> CallToolResult {
         })),
         RunReply::Refused(outcome) => use_result(outcome),
         RunReply::CwdNotAllowed => failure("refused: the template does not allow this cwd"),
-        RunReply::ArgumentsNotAllowed => failure("refused: the template takes no extra arguments"),
+        RunReply::ArgumentsNotAllowed => failure(
+            "refused: the arguments do not match the template (too many, not matching its patterns, or starting with '-')",
+        ),
+        RunReply::CwdChanged => failure("refused: the working directory changed after the check"),
+        RunReply::TooManyRuns => {
+            failure("busy: the most runs at the same time already go on; try again later")
+        }
         RunReply::SandboxMissing => {
             failure("refused: bubblewrap (bwrap) is not installed, so nothing runs")
         }

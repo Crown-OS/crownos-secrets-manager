@@ -1,7 +1,9 @@
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
-    #[error("bubblewrap (bwrap) is not installed")]
+    #[error("bubblewrap (bwrap) or systemd-run is not installed")]
     SandboxMissing,
+    #[error("the system random number generator failed")]
+    Random,
     #[error("`{0}` is not a valid environment variable name")]
     InvalidVariableName(String),
     #[error("the value for `{0}` has a NUL byte, which an environment variable cannot hold")]
