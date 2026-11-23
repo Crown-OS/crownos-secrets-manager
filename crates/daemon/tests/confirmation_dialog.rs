@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crownos_ipc::Pending;
-use crownos_secretsd::confirmation::{ConfirmationAsker, DialogRequest, Verdict, VerdictFuture};
+use crownos_secretsd::confirmation::{
+    ConfirmationAsker, DialogRequest, UseKind, Verdict, VerdictFuture,
+};
 use crownos_secretsd::{AcceptedProgramIdentity, AdminPolicy, SecretsService};
 use secrets_core::{Binding, Confirm, HttpBinding, SecretKind, SecretName, UseOutcome};
 use secrets_protocol::secrets::Client;
@@ -43,7 +45,7 @@ impl ScriptedAsker {
 struct SharedAsker(Arc<ScriptedAsker>);
 
 impl ConfirmationAsker for SharedAsker {
-    fn ask(&self, request: DialogRequest) -> VerdictFuture {
+    fn ask(&self, _kind: UseKind, request: DialogRequest) -> VerdictFuture {
         self.0.asked.lock().unwrap().push(request);
         let (verdict, after) = self
             .0

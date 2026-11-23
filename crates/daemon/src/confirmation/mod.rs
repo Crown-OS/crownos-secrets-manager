@@ -1,16 +1,19 @@
 //! The on-screen question before a secret is used: "Allow <agent> to use the secret …?"
 
-mod dialog_process;
-
 use std::future::Future;
 use std::pin::Pin;
 
 use secrets_core::SecretName;
 
-pub use dialog_process::DialogProcessAsker;
-
 /// How long the user has to answer; no answer is a deny.
 pub const ANSWER_TIME: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// What the secrets are wanted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseKind {
+    Run,
+    Proxy,
+}
 
 /// One question for the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,9 +68,20 @@ pub enum Verdict {
 
 pub type VerdictFuture = Pin<Box<dyn Future<Output = Verdict> + Send>>;
 
-/// Shows the dialog: the consent dialog process in the session; tests give their own answers.
+/// Shows the dialog: the compositor's consent dialog in the session; tests give their own
+/// answers.
 pub trait ConfirmationAsker: Send + Sync {
-    fn ask(&self, request: DialogRequest) -> VerdictFuture;
+    fn ask(&self, kind: UseKind, request: DialogRequest) -> VerdictFuture;
+}
+
+/// No dialog can show: every use that needs one is refused.
+#[derive(Debug, Default)]
+pub struct NoConfirmation;
+
+impl ConfirmationAsker for NoConfirmation {
+    fn ask(&self, _kind: UseKind, _request: DialogRequest) -> VerdictFuture {
+        Box::pin(std::future::ready(Verdict::Unreachable))
+    }
 }
 
 #[cfg(test)]

@@ -106,14 +106,14 @@ Not all rules apply yet:
 
 - `confirm` asks you on screen before a use. `EveryUse` asks each time; `PerSession(minutes)`
   remembers your Allow for that agent (its app key) and secret for the minutes, in memory only;
-  `Never` does not ask. The daemon starts the root-owned `/usr/lib/crownos-portal-dialog` in a
-  transient user service (`systemd-run --user --pipe --wait --collect`, 1 GiB, 130 s) and reads
-  the answer from the pipe it owns; the compositor keeps synthetic input away from the dialog:
+  `Never` does not ask. The daemon asks the compositor (`ask_consent` on
+  `crownos_secret_input_manager_v1`), which starts the root-owned consent dialog itself; no
+  D-Bus service and no user service is in the path, and one question shows at a time:
   "Allow <agent> to use the secret “<name>”?", with the target (the template, the proxy hosts, or
   the window, app and origin) and the app key. The agent's name comes from its app key, never
   from the agent. No answer in 120 seconds is a deny. After a deny, the same agent gets no new
   dialog for 60 seconds, and while one dialog of an agent is open, its other uses are refused.
-  When the dialog is not installed, the use is refused with `NeedsConfirmation`. The request loop
+  Without the compositor's global, the use is refused with `NeedsConfirmation`. The request loop
   answers other callers while a dialog is open.
 - `targets` and `require_password_field` apply to typing only. When a binding has `Origin`
   targets, the origin must match one of them and the app id must match an `AppId` target, if there

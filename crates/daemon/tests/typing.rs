@@ -15,12 +15,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crownos_protocols::secret_input::v1::server::crownos_secret_consent_v1::{
+    self, Action, CrownosSecretConsentV1,
+};
 use crownos_protocols::secret_input::v1::server::crownos_secret_input_manager_v1::{
     self, CrownosSecretInputManagerV1,
 };
 use crownos_protocols::secret_input::v1::server::crownos_secret_input_request_v1::{
     self, CrownosSecretInputRequestV1, Outcome,
 };
+use crownos_secretsd::confirmation::{ConfirmationAsker, DialogRequest, UseKind, Verdict};
 use crownos_secretsd::service::{TypingShape, TypingStart, typing_outcome};
 use crownos_secretsd::typing::CompositorTyping;
 use crownos_secretsd::typing::TypingPolicy;
@@ -83,6 +87,12 @@ impl Dispatch<CrownosSecretInputManagerV1, ()> for FakeCompositor {
         _: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        if let crownos_secret_input_manager_v1::Request::AskConsent { id, action, .. } = request {
+            let question = data_init.init(id, ());
+            let granted = matches!(action, wayland_server::WEnum::Value(Action::Run));
+            question.consent(u32::from(granted));
+            return;
+        }
         if let crownos_secret_input_manager_v1::Request::CreateRequest {
             id,
             window_identifier,
@@ -148,6 +158,19 @@ impl Dispatch<CrownosSecretInputRequestV1, Mutex<TypedRequest>> for FakeComposit
             }
             _ => {}
         }
+    }
+}
+
+impl Dispatch<CrownosSecretConsentV1, ()> for FakeCompositor {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &CrownosSecretConsentV1,
+        _: crownos_secret_consent_v1::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut DataInit<'_, Self>,
+    ) {
     }
 }
 
@@ -450,6 +473,31 @@ async fn the_compositor_gets_one_request_per_typing_and_only_for_a_bound_window(
         typed.lock().unwrap().len(),
         reached,
         "a refused request reached the compositor"
+    );
+    stop.store(true, Ordering::Relaxed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_and_proxy_consent_goes_through_the_compositor() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let typing = CompositorTyping::from_socket(start_compositor(
+        FakeCompositor::default(),
+        Arc::clone(&stop),
+    ));
+    let asker = typing.consent_asker();
+    let request = || DialogRequest {
+        app_key: format!("exe:{AGENT}"),
+        agent: "computer-use".into(),
+        names: vec![name("pass")],
+        target: "the command template “deploy”".into(),
+        session_minutes: None,
+    };
+    assert_eq!(asker.ask(UseKind::Run, request()).await, Verdict::Granted);
+    assert_eq!(asker.ask(UseKind::Proxy, request()).await, Verdict::Denied);
+    let without = CompositorTyping::unavailable().consent_asker();
+    assert_eq!(
+        without.ask(UseKind::Run, request()).await,
+        Verdict::Unreachable
     );
     stop.store(true, Ordering::Relaxed);
 }

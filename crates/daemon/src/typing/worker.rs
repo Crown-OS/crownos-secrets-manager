@@ -3,6 +3,9 @@ use std::os::fd::AsFd as _;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use crownos_protocols::secret_input::v1::client::crownos_secret_consent_v1::{
+    self, Action, CrownosSecretConsentV1,
+};
 use crownos_protocols::secret_input::v1::client::crownos_secret_input_manager_v1::CrownosSecretInputManagerV1;
 use crownos_protocols::secret_input::v1::client::crownos_secret_input_request_v1::{
     self, CrownosSecretInputRequestV1, Kind, Outcome,
@@ -14,7 +17,8 @@ use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 
 use super::value_fd::sealed_value;
-use super::{TypingJob, TypingRequest, TypingResult, ValueKind};
+use super::{ConsentRequest, Job, TypingRequest, TypingResult, ValueKind};
+use crate::confirmation::UseKind;
 
 /// The compositor answers within its own 120 s; this covers the typing after that.
 const REQUEST_TIME: Duration = Duration::from_secs(150);
@@ -24,6 +28,22 @@ const LOST_CONNECTION_EXIT_CODE: i32 = 75;
 #[derive(Debug, Default)]
 struct WorkerState {
     done: HashMap<u32, u32>,
+    consents: HashMap<u32, u32>,
+}
+
+impl Dispatch<CrownosSecretConsentV1, u32> for WorkerState {
+    fn event(
+        state: &mut Self,
+        _: &CrownosSecretConsentV1,
+        event: crownos_secret_consent_v1::Event,
+        id: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let crownos_secret_consent_v1::Event::Consent { granted } = event {
+            state.consents.insert(*id, granted);
+        }
+    }
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for WorkerState {
@@ -91,21 +111,53 @@ impl Worker {
         })
     }
 
-    pub(super) fn run(mut self, jobs: &Receiver<TypingJob>) {
+    /// One job at a time, so the user sees one consent dialog at a time.
+    pub(super) fn run(mut self, jobs: &Receiver<Job>) {
         while let Ok(job) = jobs.recv() {
-            let result = self.type_request(&job.request);
-            drop(job.request);
-            match result {
-                Some(result) => {
-                    let _ = job.answer.send(result);
+            let delivered = match job {
+                Job::Typing { request, answer } => {
+                    let result = self.type_request(&request);
+                    drop(request);
+                    result.map(|result| {
+                        let _ = answer.send(result);
+                    })
                 }
-                None => {
-                    tracing::error!(
-                        "the compositor connection broke; exiting so systemd restarts the daemon"
-                    );
-                    std::process::exit(LOST_CONNECTION_EXIT_CODE);
-                }
+                Job::Consent { request, answer } => self.ask_consent(&request).map(|granted| {
+                    let _ = answer.send(granted);
+                }),
+            };
+            if delivered.is_none() {
+                tracing::error!(
+                    "the compositor connection broke; exiting so systemd restarts the daemon"
+                );
+                std::process::exit(LOST_CONNECTION_EXIT_CODE);
             }
+        }
+    }
+
+    /// `None` when the connection broke. No answer in time is a deny.
+    fn ask_consent(&mut self, request: &ConsentRequest) -> Option<bool> {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        let action = match request.kind {
+            UseKind::Run => Action::Run,
+            UseKind::Proxy => Action::Proxy,
+        };
+        let proxy = self.manager.ask_consent(
+            request.agent_app_key.clone(),
+            request.secret_names.clone(),
+            action,
+            request.detail.clone(),
+            &self.queue.handle(),
+            id,
+        );
+        let answered = self.wait_until(|state| state.consents.remove(&id));
+        proxy.destroy();
+        let _ = self.queue.flush();
+        match answered {
+            Waited::Done(granted) => Some(granted == 1),
+            Waited::TimedOut => Some(false),
+            Waited::Lost => None,
         }
     }
 
@@ -135,7 +187,7 @@ impl Worker {
             proxy.add_value(descriptor.as_fd(), kind, u32::from(value.tab_after));
         }
         proxy.commit();
-        let outcome = self.wait_for(id);
+        let outcome = self.wait_until(|state| state.done.remove(&id));
         proxy.destroy();
         let _ = self.queue.flush();
         match outcome {
@@ -145,14 +197,14 @@ impl Worker {
         }
     }
 
-    fn wait_for(&mut self, id: u32) -> Waited {
+    fn wait_until(&mut self, mut answer: impl FnMut(&mut WorkerState) -> Option<u32>) -> Waited {
         let deadline = Instant::now() + REQUEST_TIME;
         loop {
             if self.queue.flush().is_err() || self.queue.dispatch_pending(&mut self.state).is_err()
             {
                 return Waited::Lost;
             }
-            if let Some(outcome) = self.state.done.remove(&id) {
+            if let Some(outcome) = answer(&mut self.state) {
                 return Waited::Done(outcome);
             }
             let Some(guard) = self.queue.prepare_read() else {

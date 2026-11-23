@@ -20,7 +20,7 @@ use secrets_vault::Vault;
 
 use crate::AdminPolicy;
 use crate::Caller;
-use crate::confirmation::{ConfirmationAsker, DialogProcessAsker};
+use crate::confirmation::{ConfirmationAsker, NoConfirmation};
 use crate::util::rate::RateLimiter;
 
 pub use confirmations::Confirmation;
@@ -86,7 +86,7 @@ impl SecretsService {
             proxy_ca_hosts: None,
             next_session_id: 1,
             launcher: secrets_run::Launcher::default(),
-            asker: std::sync::Arc::new(DialogProcessAsker::installed()),
+            asker: std::sync::Arc::new(NoConfirmation),
             decision: None,
             deny_cool_downs: HashMap::new(),
             session_approvals: HashMap::new(),

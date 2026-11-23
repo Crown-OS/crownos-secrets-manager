@@ -13,6 +13,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Sender, channel};
 
 use secrecy::SecretSlice;
+use secrets_core::SecretName;
+
+use crate::confirmation::{ConfirmationAsker, DialogRequest, UseKind, Verdict, VerdictFuture};
 use tokio::sync::oneshot;
 
 /// The kind of a value, so the compositor can treat a password as one.
@@ -67,16 +70,31 @@ pub enum TypingResult {
     SessionLocked,
 }
 
-pub(crate) struct TypingJob {
-    request: TypingRequest,
-    answer: oneshot::Sender<TypingResult>,
+/// A run or proxy question for the compositor's consent dialog. Display text only.
+#[derive(Debug, Clone)]
+pub struct ConsentRequest {
+    pub agent_app_key: String,
+    pub secret_names: String,
+    pub kind: UseKind,
+    pub detail: String,
+}
+
+pub(crate) enum Job {
+    Typing {
+        request: TypingRequest,
+        answer: oneshot::Sender<TypingResult>,
+    },
+    Consent {
+        request: ConsentRequest,
+        answer: oneshot::Sender<bool>,
+    },
 }
 
 /// The daemon's side of the protocol: available when the compositor offered the global at
 /// start.
 #[derive(Debug, Default)]
 pub struct CompositorTyping {
-    jobs: Option<Sender<TypingJob>>,
+    jobs: Option<Sender<Job>>,
 }
 
 impl CompositorTyping {
@@ -134,7 +152,55 @@ impl CompositorTyping {
     pub(crate) fn submit(&self, request: TypingRequest) -> Option<oneshot::Receiver<TypingResult>> {
         let jobs = self.jobs.as_ref()?;
         let (answer, receiver) = oneshot::channel();
-        jobs.send(TypingJob { request, answer }).ok()?;
+        jobs.send(Job::Typing { request, answer }).ok()?;
         Some(receiver)
+    }
+
+    /// The run and proxy questions through the compositor's consent dialog on this connection.
+    pub fn consent_asker(&self) -> CompositorConsentAsker {
+        CompositorConsentAsker {
+            jobs: self.jobs.clone(),
+        }
+    }
+}
+
+/// Asks run and proxy questions in the compositor's consent dialog. No D-Bus service and no
+/// user service is in the path: the compositor starts the root-owned dialog itself.
+#[derive(Debug, Clone)]
+pub struct CompositorConsentAsker {
+    jobs: Option<Sender<Job>>,
+}
+
+impl ConfirmationAsker for CompositorConsentAsker {
+    fn ask(&self, kind: UseKind, request: DialogRequest) -> VerdictFuture {
+        let (answer, receiver) = oneshot::channel();
+        let consent = ConsentRequest {
+            agent_app_key: request.app_key.clone(),
+            secret_names: request
+                .names
+                .iter()
+                .map(SecretName::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            kind,
+            detail: request.target,
+        };
+        let sent = self.jobs.as_ref().is_some_and(|jobs| {
+            jobs.send(Job::Consent {
+                request: consent,
+                answer,
+            })
+            .is_ok()
+        });
+        Box::pin(async move {
+            if !sent {
+                return Verdict::Unreachable;
+            }
+            match receiver.await {
+                Ok(true) => Verdict::Granted,
+                Ok(false) => Verdict::Denied,
+                Err(_) => Verdict::Unreachable,
+            }
+        })
     }
 }

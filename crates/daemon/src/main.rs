@@ -16,8 +16,10 @@ async fn main() -> Result<()> {
         .context("finding the data directory")?
         .join("crownos");
     let vault = Vault::new(data_directory.join("secrets.vault"));
+    let consent = std::sync::Arc::new(typing.consent_asker());
     let service = SecretsService::new(vault, AdminPolicy::installed_admins(), data_directory)
-        .with_typing(typing);
+        .with_typing(typing)
+        .with_confirmation_asker(consent);
     let mut server =
         crownos_secretsd::server::bind_socket(None).context("binding the secrets socket")?;
     tracing::info!("serving {}", secrets::SERVICE);

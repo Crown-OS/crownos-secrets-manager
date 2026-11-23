@@ -1,5 +1,5 @@
-//! The portal dialog before a run or a proxy session. Typing has no portal dialog: the
-//! compositor asks for each typing request itself.
+//! The consent dialog before a run or a proxy session, which the compositor shows. Typing has
+//! no such dialog here: the compositor asks for each typing request itself.
 
 use std::time::Instant;
 
@@ -10,7 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::Outgoing;
 use crate::SecretsService;
-use crate::confirmation::DialogRequest;
+use crate::confirmation::{DialogRequest, UseKind};
 
 /// Opens the dialog in a task; the answer comes back as [`Outgoing::Answered`].
 pub(super) fn ask_first(
@@ -23,8 +23,13 @@ pub(super) fn ask_first(
     service.dialog_opened(&request);
     let asker = service.confirmation_asker();
     let outgoing = outgoing.clone();
+    let kind = if message.selector == <secrets::proxy_session as MethodMsg>::SELECTOR {
+        UseKind::Proxy
+    } else {
+        UseKind::Run
+    };
     tokio::spawn(async move {
-        let verdict = asker.ask(request.clone()).await;
+        let verdict = asker.ask(kind, request.clone()).await;
         let _ = outgoing.send(Outgoing::Answered {
             peer,
             message,
