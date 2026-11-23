@@ -12,29 +12,47 @@ use crate::util::percent::{PercentStyle, percent_encode};
 /// Encoded forms shorter than this are left out: they would match ordinary text.
 pub(crate) const MINIMUM_ENCODED_LENGTH: usize = 4;
 
+/// A byte string that gives a value away.
+pub(crate) struct RevealingForm {
+    pub(crate) bytes: Zeroizing<Vec<u8>>,
+    /// Base64 encoders wrap lines (MIME at 76 columns), so a line break can sit between any
+    /// two characters.
+    pub(crate) line_breaks_allowed: bool,
+}
+
 /// The value first, then every encoded form that is long enough. The list can hold duplicates.
-pub(crate) fn revealing_forms(value: &[u8]) -> Vec<Zeroizing<Vec<u8>>> {
-    let mut forms = vec![Zeroizing::new(value.to_vec())];
-    let mut encoded = Vec::new();
-    for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
-        for alignment in 0..3 {
-            encoded.push(base64_fragment(engine, value, alignment));
-        }
-    }
-    for case in [HexCase::Lower, HexCase::Upper] {
-        encoded.push(hex_encode(value, case));
-        encoded.push(percent_encode(value, PercentStyle::Uri(case)));
-    }
-    encoded.push(percent_encode(value, PercentStyle::Form));
+pub(crate) fn revealing_forms(value: &[u8]) -> Vec<RevealingForm> {
+    let exact = RevealingForm {
+        bytes: Zeroizing::new(value.to_vec()),
+        line_breaks_allowed: false,
+    };
+    let base64 = [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD]
+        .into_iter()
+        .flat_map(|engine| {
+            (0..3).map(move |alignment| RevealingForm {
+                bytes: base64_fragment(engine, value, alignment),
+                line_breaks_allowed: true,
+            })
+        });
+    let mut plain = vec![
+        hex_encode(value, HexCase::Lower),
+        hex_encode(value, HexCase::Upper),
+    ];
+    plain.extend(PercentStyle::all().map(|style| percent_encode(value, style)));
     if let Ok(text) = std::str::from_utf8(value) {
-        encoded.extend(JsonEscapeStyle::ALL.map(|style| json_escape(text, style)));
+        plain.extend(JsonEscapeStyle::all().map(|style| json_escape(text, style)));
     }
-    forms.extend(
-        encoded
-            .into_iter()
-            .filter(|form| form.len() >= MINIMUM_ENCODED_LENGTH),
-    );
-    forms
+    let plain = plain.into_iter().map(|bytes| RevealingForm {
+        bytes,
+        line_breaks_allowed: false,
+    });
+    std::iter::once(exact)
+        .chain(
+            base64
+                .chain(plain)
+                .filter(|form| form.bytes.len() >= MINIMUM_ENCODED_LENGTH),
+        )
+        .collect()
 }
 
 /// The base64 characters that depend only on `value` when `alignment` bytes (0, 1 or 2) come
@@ -89,12 +107,12 @@ mod tests {
     #[test]
     fn short_encodings_are_left_out_but_the_value_stays() {
         let forms = revealing_forms(b"ab");
-        assert_eq!(forms[0].as_slice(), b"ab");
+        assert_eq!(forms[0].bytes.as_slice(), b"ab");
         assert!(
             forms
                 .iter()
                 .skip(1)
-                .all(|form| form.len() >= MINIMUM_ENCODED_LENGTH)
+                .all(|form| form.bytes.len() >= MINIMUM_ENCODED_LENGTH)
         );
     }
 }

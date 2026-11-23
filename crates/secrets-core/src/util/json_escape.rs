@@ -2,7 +2,8 @@ use zeroize::Zeroizing;
 
 use crate::util::hex::HexCase;
 
-/// The escape choices that common JSON encoders make.
+/// The escape choices that common JSON encoders make. Encoders mix them, so the scrubber tries
+/// every combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct JsonEscapeStyle {
     /// `/` becomes `\/` (PHP, some Java encoders).
@@ -11,31 +12,19 @@ pub(crate) struct JsonEscapeStyle {
     pub(crate) ascii_only: bool,
     /// `<`, `>`, `&`, U+2028 and U+2029 become `\uXXXX` (Go `encoding/json`).
     pub(crate) html_safe: bool,
+    /// `\u00E9` instead of `\u00e9` (Jackson, .NET).
+    pub(crate) uppercase_hex: bool,
 }
 
 impl JsonEscapeStyle {
-    pub(crate) const ALL: [Self; 4] = [
-        Self {
-            escape_slash: false,
-            ascii_only: false,
-            html_safe: false,
-        },
-        Self {
-            escape_slash: true,
-            ascii_only: false,
-            html_safe: false,
-        },
-        Self {
-            escape_slash: false,
-            ascii_only: true,
-            html_safe: false,
-        },
-        Self {
-            escape_slash: false,
-            ascii_only: false,
-            html_safe: true,
-        },
-    ];
+    pub(crate) fn all() -> impl Iterator<Item = Self> {
+        (0u8..16).map(|bits| Self {
+            escape_slash: bits & 1 != 0,
+            ascii_only: bits & 2 != 0,
+            html_safe: bits & 4 != 0,
+            uppercase_hex: bits & 8 != 0,
+        })
+    }
 
     fn needs_unicode_escape(self, character: char) -> bool {
         u32::from(character) < 0x20
@@ -44,17 +33,22 @@ impl JsonEscapeStyle {
     }
 }
 
-fn push_unicode_escape(encoded: &mut Vec<u8>, unit: u16) {
+fn push_unicode_escape(encoded: &mut Vec<u8>, unit: u16, case: HexCase) {
     let [high, low] = unit.to_be_bytes();
     encoded.extend_from_slice(b"\\u");
-    encoded.extend_from_slice(&HexCase::Lower.digit_pair(high));
-    encoded.extend_from_slice(&HexCase::Lower.digit_pair(low));
+    encoded.extend_from_slice(&case.digit_pair(high));
+    encoded.extend_from_slice(&case.digit_pair(low));
 }
 
 /// The text between the quotes of a JSON string that holds `text`.
 pub(crate) fn json_escape(text: &str, style: JsonEscapeStyle) -> Zeroizing<Vec<u8>> {
     let mut encoded = Zeroizing::new(Vec::with_capacity(text.len() * 6));
     let mut utf16_units = [0u16; 2];
+    let case = if style.uppercase_hex {
+        HexCase::Upper
+    } else {
+        HexCase::Lower
+    };
     for character in text.chars() {
         match character {
             '"' => encoded.extend_from_slice(b"\\\""),
@@ -67,7 +61,7 @@ pub(crate) fn json_escape(text: &str, style: JsonEscapeStyle) -> Zeroizing<Vec<u
             '/' if style.escape_slash => encoded.extend_from_slice(b"\\/"),
             _ if style.needs_unicode_escape(character) => {
                 for &unit in character.encode_utf16(&mut utf16_units).iter() {
-                    push_unicode_escape(&mut encoded, unit);
+                    push_unicode_escape(&mut encoded, unit, case);
                 }
             }
             _ => {

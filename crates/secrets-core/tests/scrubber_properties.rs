@@ -160,6 +160,106 @@ proptest! {
     }
 }
 
+fn wrapped(encoded: &str, columns: usize, line_break: &str) -> String {
+    encoded
+        .as_bytes()
+        .chunks(columns)
+        .map(|line| String::from_utf8_lossy(line).into_owned())
+        .collect::<Vec<_>>()
+        .join(line_break)
+}
+
+fn percent(value: &[u8], keeps: impl Fn(u8) -> bool) -> String {
+    value
+        .iter()
+        .map(|&byte| {
+            if keeps(byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+fn json_unicode_escaped(text: &str, uppercase: bool) -> String {
+    let mut escaped = String::new();
+    for character in text.chars() {
+        if character.is_ascii()
+            && !character.is_ascii_control()
+            && character != '"'
+            && character != '\\'
+        {
+            escaped.push(character);
+            continue;
+        }
+        let mut units = [0u16; 2];
+        for unit in character.encode_utf16(&mut units) {
+            if uppercase {
+                escaped.push_str(&format!("\\u{unit:04X}"));
+            } else {
+                escaped.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    escaped
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn a_value_inside_wrapped_base64_never_survives(
+        value in prop::collection::vec(any::<u8>(), 6..60),
+        prefix in prop::collection::vec(any::<u8>(), 0..90),
+        suffix in prop::collection::vec(any::<u8>(), 0..9),
+        crlf in any::<bool>(),
+        columns in prop::sample::select(vec![76usize, 64, 4]),
+        chunks in chunking_strategy(),
+    ) {
+        let scrubber = scrubber_for(&value);
+        let stream = [prefix.as_slice(), &value, &suffix].concat();
+        let encoded = STANDARD_NO_PAD.encode(&stream);
+        let revealing = determined_base64(&encoded, prefix.len(), prefix.len() + value.len());
+        let line_break = if crlf { "\r\n" } else { "\n" };
+        let output = scrub_in_chunks(&scrubber, wrapped(&encoded, columns, line_break).as_bytes(), &chunks);
+        let joined: Vec<u8> = output.into_iter().filter(|byte| !matches!(byte, b'\r' | b'\n')).collect();
+        prop_assert!(!contains(&joined, &revealing));
+    }
+
+    #[test]
+    fn a_value_in_any_common_percent_encoding_never_survives(
+        value in "[a-zA-Z0-9 !*'()/~._-]{4,24}",
+        chunks in chunking_strategy(),
+    ) {
+        let scrubber = scrubber_for(value.as_bytes());
+        let uri_component = percent(value.as_bytes(), |byte| {
+            byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte)
+        });
+        let python_quote = percent(value.as_bytes(), |byte| {
+            byte.is_ascii_alphanumeric() || b"-_.~/".contains(&byte)
+        });
+        for encoded in [uri_component, python_quote] {
+            let input = format!("q={encoded}&x=1");
+            let output = scrub_in_chunks(&scrubber, input.as_bytes(), &chunks);
+            prop_assert!(!contains(&output, encoded.as_bytes()), "{}", encoded);
+        }
+    }
+
+    #[test]
+    fn a_value_with_upper_or_lower_case_unicode_escapes_never_survives(
+        value in "[a-zé€😀<>&/]{4,16}",
+        uppercase in any::<bool>(),
+        chunks in chunking_strategy(),
+    ) {
+        let scrubber = scrubber_for(value.as_bytes());
+        let escaped = json_unicode_escaped(&value, uppercase);
+        let document = format!("{{\"output\":\"{escaped}\"}}");
+        let output = scrub_in_chunks(&scrubber, document.as_bytes(), &chunks);
+        prop_assert!(!contains(&output, escaped.as_bytes()), "{}", escaped);
+    }
+}
+
 #[test]
 fn self_overlapping_values_are_scrubbed() {
     let scrubber = scrubber_for(b"aaaa");

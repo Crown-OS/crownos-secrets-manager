@@ -16,7 +16,47 @@ pub use stream::ScrubStream;
 
 struct Pattern {
     bytes: Zeroizing<Vec<u8>>,
+    line_breaks_allowed: bool,
     label_index: usize,
+}
+
+impl Pattern {
+    /// The most input bytes a match can take: one CRLF between each two pattern bytes.
+    fn longest_match(&self) -> usize {
+        if self.line_breaks_allowed {
+            self.bytes.len() * 3 - 2
+        } else {
+            self.bytes.len()
+        }
+    }
+
+    /// How many bytes of `haystack` a match at its start takes.
+    fn matched_length(&self, haystack: &[u8]) -> Option<usize> {
+        if !self.line_breaks_allowed {
+            return haystack
+                .starts_with(&self.bytes)
+                .then_some(self.bytes.len());
+        }
+        let mut position = 0;
+        for (index, &expected) in self.bytes.iter().enumerate() {
+            if index > 0 {
+                position += line_break_length(haystack.get(position..)?);
+            }
+            if *haystack.get(position)? != expected {
+                return None;
+            }
+            position += 1;
+        }
+        Some(position)
+    }
+}
+
+fn line_break_length(rest: &[u8]) -> usize {
+    if rest.starts_with(b"\r\n") {
+        2
+    } else {
+        usize::from(rest.starts_with(b"\n"))
+    }
 }
 
 pub struct Scrubber {
@@ -24,7 +64,8 @@ pub struct Scrubber {
     patterns: Vec<Pattern>,
     labels: Vec<String>,
     first_bytes: [bool; 256],
-    longest_pattern: usize,
+    /// The most input bytes one match can take.
+    longest_match: usize,
 }
 
 impl std::fmt::Debug for Scrubber {
@@ -43,7 +84,7 @@ impl Default for Scrubber {
             patterns: Vec::new(),
             labels: Vec::new(),
             first_bytes: [false; 256],
-            longest_pattern: 0,
+            longest_match: 0,
         }
     }
 }
@@ -60,17 +101,26 @@ impl Scrubber {
         }
         let label_index = self.labels.len();
         self.labels.push(format!("[secret:{name}]"));
-        for bytes in patterns::revealing_forms(value) {
-            if self.patterns.iter().any(|pattern| pattern.bytes == bytes) {
+        for form in patterns::revealing_forms(value) {
+            if self
+                .patterns
+                .iter()
+                .any(|pattern| pattern.bytes == form.bytes)
+            {
                 continue;
             }
-            if let Some(&first) = bytes.first()
+            if let Some(&first) = form.bytes.first()
                 && let Some(seen) = self.first_bytes.get_mut(usize::from(first))
             {
                 *seen = true;
             }
-            self.longest_pattern = self.longest_pattern.max(bytes.len());
-            self.patterns.push(Pattern { bytes, label_index });
+            let pattern = Pattern {
+                bytes: form.bytes,
+                line_breaks_allowed: form.line_breaks_allowed,
+                label_index,
+            };
+            self.longest_match = self.longest_match.max(pattern.longest_match());
+            self.patterns.push(pattern);
         }
         self.patterns
             .sort_by_key(|pattern| std::cmp::Reverse(pattern.bytes.len()));
@@ -94,12 +144,12 @@ impl Scrubber {
         if !self.may_start_match(first) {
             return None;
         }
-        let pattern = self
+        let (pattern, matched_length) = self
             .patterns
             .iter()
-            .find(|pattern| rest.starts_with(&pattern.bytes))?;
+            .find_map(|pattern| Some((pattern, pattern.matched_length(rest)?)))?;
         let label = self.labels.get(pattern.label_index)?;
-        Some((label.as_bytes(), pattern.bytes.len()))
+        Some((label.as_bytes(), matched_length))
     }
 
     fn may_start_match(&self, byte: u8) -> bool {
