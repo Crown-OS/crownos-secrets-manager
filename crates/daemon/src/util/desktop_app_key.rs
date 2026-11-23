@@ -13,7 +13,8 @@ const DESKTOP_ENTRY_GROUP: &str = "[Desktop Entry]";
 
 /// The key of the app whose desktop entry is `<app_id>.desktop` in one of `directories`,
 /// first match first, with a launcher replaced by the program it starts. `None` for an unknown
-/// app, or an entry whose program the user can change.
+/// app, an entry whose program the user can change, or a Flatpak app: a Flatpak window's key is
+/// the sandbox's own claim, which a host process can make too, so no secret is typed into it.
 pub(crate) fn desktop_app_key(
     app_id: &str,
     directories: &[PathBuf],
@@ -26,7 +27,7 @@ pub(crate) fn desktop_app_key(
         std::fs::read_to_string(directory.join(format!("{app_id}.desktop"))).ok()
     })?;
     let key = entry_key(&entry, launchers)?;
-    (!key.is_session_only(None)).then_some(key)
+    (!key.is_session_only(None) && !key.is_sandboxed()).then_some(key)
 }
 
 fn entry_key(entry: &str, launchers: &LauncherMap) -> Option<AppKey> {
@@ -100,6 +101,24 @@ mod tests {
                 app_id: "org.example.App".into()
             })
         );
+    }
+
+    #[test]
+    fn a_flatpak_app_gets_no_typing() {
+        let directory = std::env::temp_dir().join(format!("desktop-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).ok();
+        std::fs::write(
+            directory.join("org.example.App.desktop"),
+            "[Desktop Entry]\nExec=/usr/bin/flatpak run org.example.App\nX-Flatpak=org.example.App\n",
+        )
+        .ok();
+        let key = desktop_app_key(
+            "org.example.App",
+            std::slice::from_ref(&directory),
+            &LauncherMap::built_in(),
+        );
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(key, None);
     }
 
     #[test]
