@@ -20,3 +20,6 @@ pub use kind::SecretKind;
 pub use name::SecretName;
 pub use outcome::UseOutcome;
 pub use scrub::{ScrubStream, Scrubber};
+
+/// The largest secret value the manager accepts and stores.
+pub const MAX_VALUE_BYTES: usize = 32 * 1024;

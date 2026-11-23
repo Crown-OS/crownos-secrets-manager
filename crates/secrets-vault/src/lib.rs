@@ -17,5 +17,4 @@ pub use kdf::KdfParams;
 pub use open_vault::OpenVault;
 pub use vault::Vault;
 
-/// The largest value the vault stores.
-pub const MAX_VALUE_BYTES: usize = 32 * 1024;
+pub use secrets_core::MAX_VALUE_BYTES;

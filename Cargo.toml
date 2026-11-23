@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/secrets-core",
     "crates/secrets-vault",
+    "crates/secrets-protocol",
+    "crates/daemon",
 ]
 
 [workspace.package]

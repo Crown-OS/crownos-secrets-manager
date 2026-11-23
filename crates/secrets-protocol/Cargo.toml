@@ -1,0 +1,21 @@
+[package]
+name = "secrets-protocol"
+description = "The crownos-ipc contract of crownos-secretsd. No method returns a secret value"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+secrets-core = { workspace = true }
+
+crownos-ipc = { workspace = true }
+rustix = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

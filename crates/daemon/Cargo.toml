@@ -1,0 +1,37 @@
+[package]
+name = "crownos-secretsd"
+description = "The CrownOS secrets daemon: holds the unlocked vault and uses secrets for agents by name, never returning a value"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "crownos-secretsd"
+path = "src/main.rs"
+
+[dependencies]
+secrets-core = { workspace = true }
+secrets-protocol = { workspace = true }
+secrets-vault = { workspace = true }
+
+anyhow = { workspace = true }
+crownos-config = { workspace = true }
+crownos-ipc = { workspace = true, features = ["tokio"] }
+dirs = { workspace = true }
+rustix = { workspace = true }
+secrecy = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "signal", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "net"] }
+
+[lints]
+workspace = true
