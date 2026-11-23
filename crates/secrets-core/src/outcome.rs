@@ -1,0 +1,17 @@
+use serde::{Deserialize, Serialize};
+
+/// What happened when an agent asked to use a secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UseOutcome {
+    Done,
+    /// The binding of the secret does not allow this agent or this target.
+    Denied,
+    /// The binding requires a password field and the focused field is not one.
+    NotPasswordField,
+    /// The page origin does not match the binding.
+    OriginMismatch,
+    RateLimited,
+    Locked,
+    /// No secret has this name.
+    Unknown,
+}
