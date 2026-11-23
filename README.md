@@ -245,7 +245,9 @@ daemon answers no other request.
 
 - The daemon sets `PR_SET_DUMPABLE=0` at start. There is no core dump. A process of your user
   cannot attach with ptrace or read `/proc/<pid>/mem` of the daemon. The CLI does the same while
-  it holds the master password or a value.
+  it reads the master password or a value. When both are in their pipes, it is dumpable again,
+  because the daemon must read `/proc/<pid>/exe` of the CLI, and the kernel refuses that for a
+  non-dumpable process.
 - The daemon locks the pages of the key and of each value with `mlock`. It never unlocks them:
   `mlock` works on full pages, and a page can hold other data too. When `RLIMIT_MEMLOCK` stops a
   lock, the daemon logs this one time.

@@ -10,9 +10,8 @@ mod prompt;
 mod settings_arguments;
 mod template_arguments;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use rustix::process::{DumpableBehavior, set_dumpable_behavior};
 use secrets_core::{SecretKind, SecretName, TemplateName};
 use secrets_protocol::transfer::value_pipe;
 
@@ -79,8 +78,6 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    set_dumpable_behavior(DumpableBehavior::NotDumpable)
-        .context("making the process non-dumpable before it reads a password")?;
     match Cli::parse().command {
         Command::Init => {
             let password = prompt::new_master_password()?;
@@ -94,9 +91,11 @@ fn main() -> Result<()> {
         Command::Lock => Daemon::connect()?.call(|client| client.lock())?,
         Command::Add { name, kind } => {
             let mut daemon = Daemon::connect()?;
-            let password = prompt::master_password()?;
-            let value = prompt::hidden(&format!("Value for {name}: "))?;
-            let value = value_pipe(value.as_bytes())?;
+            let (password, value) = prompt::while_holding_secrets(|| {
+                let password = prompt::master_password()?;
+                let value = prompt::hidden(&format!("Value for {name}: "))?;
+                Ok((password, value_pipe(value.as_bytes())?))
+            })?;
             daemon.call(|client| client.add(name.clone(), kind, password, value))?;
             println!(
                 "Stored {name}. Run `crownos-secrets bind {name} --agent <path>` to let an agent use it."
