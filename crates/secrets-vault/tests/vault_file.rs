@@ -321,3 +321,12 @@ fn the_vault_locks_itself_after_the_sealed_timeout() {
     ));
     assert!(vault.locks_in(start).is_none());
 }
+
+#[test]
+fn the_encoding_of_the_older_kinds_does_not_change() {
+    let encoded: Vec<Vec<u8>> = SecretKind::ALL
+        .iter()
+        .map(|kind| postcard::to_allocvec(kind).unwrap())
+        .collect();
+    assert_eq!(encoded, [[0], [1], [2], [3], [4], [5]]);
+}

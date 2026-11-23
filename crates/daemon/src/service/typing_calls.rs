@@ -75,6 +75,10 @@ impl SecretsService {
         target_text: &str,
         now: Instant,
     ) -> Result<TypingStart, ServiceError> {
+        if !self.typing_policy.allows_caller(caller) {
+            audit::use_decided(caller, names, target_text, "not-a-typing-caller");
+            return Ok(TypingStart::Refused(UseOutcome::Denied));
+        }
         if let Some(outcome) =
             self.refusal_for_use(caller, names, target_text, now, ConfirmedBy::Compositor)
         {
@@ -84,19 +88,34 @@ impl SecretsService {
             audit::use_decided(caller, names, target_text, "target-not-bound");
             return Ok(TypingStart::Refused(outcome));
         }
+        let Some(expected_app_key) = self.typing_policy.expected_app_key(&target.app_id) else {
+            audit::use_decided(caller, names, target_text, "no-installed-app");
+            return Ok(TypingStart::Refused(UseOutcome::Denied));
+        };
         if !self.typing.is_available() {
             audit::use_decided(caller, names, target_text, "unavailable");
             return Err(ServiceError::Unavailable);
         }
         let contents = self.vault.contents(now)?;
         let rules = contents.rules();
-        let mut values = Vec::with_capacity(names.len());
-        let mut require_password_field = false;
-        for (index, name) in names.iter().enumerate() {
+        let mut kinds = Vec::with_capacity(names.len());
+        for name in names {
             let entry = rules
                 .secrets
                 .get(name)
                 .ok_or_else(|| ServiceError::UnknownSecret(name.clone()))?;
+            kinds.push(if entry.binding.require_password_field {
+                SecretKind::Password
+            } else {
+                entry.kind
+            });
+        }
+        let Some(value_kinds) = typed_value_kinds(shape, &kinds) else {
+            audit::use_decided(caller, names, target_text, "wrong-secret-kind");
+            return Ok(TypingStart::Refused(UseOutcome::Denied));
+        };
+        let mut values = Vec::with_capacity(names.len());
+        for (name, kind) in names.iter().zip(value_kinds) {
             let value = contents
                 .value(name)
                 .ok_or_else(|| ServiceError::UnknownSecret(name.clone()))?;
@@ -104,28 +123,16 @@ impl SecretsService {
                 audit::use_decided(caller, names, target_text, "value-too-large");
                 return Ok(TypingStart::Refused(UseOutcome::Denied));
             }
-            let is_login_user = shape == TypingShape::Login && index == 0;
-            let is_login_password = shape == TypingShape::Login && index == 1;
-            let is_secret_kind = matches!(
-                entry.kind,
-                SecretKind::Password | SecretKind::ApiKey | SecretKind::Token
-            );
-            let password = is_login_password
-                || (!is_login_user && (is_secret_kind || entry.binding.require_password_field));
-            require_password_field |= password;
             values.push(TypingValue {
                 value: SecretSlice::from(value.expose_secret().to_vec()),
-                kind: if password {
-                    ValueKind::Password
-                } else {
-                    ValueKind::Username
-                },
-                tab_after: is_login_user,
+                kind,
+                tab_after: shape == TypingShape::Login && kind == ValueKind::Username,
             });
         }
+        let require_password_field = values.iter().any(|value| value.kind == ValueKind::Password);
         let request = TypingRequest {
             window: target.window.clone(),
-            app_id: target.app_id.clone(),
+            expected_app_key: expected_app_key.to_string(),
             require_password_field,
             agent: caller.display_name(),
             secret_names: names
@@ -143,6 +150,28 @@ impl SecretsService {
         self.mark_used(names);
         audit::use_decided(caller, names, target_text, "typing");
         Ok(TypingStart::Waiting(waiting))
+    }
+}
+
+/// How each secret is typed. Only a `Username` secret goes into a field that is not a password
+/// field; every other kind needs one. A login is a `Username`, then another kind. `None` when
+/// the kinds do not fit the shape.
+fn typed_value_kinds(shape: TypingShape, kinds: &[SecretKind]) -> Option<Vec<ValueKind>> {
+    let value_kind = |kind: &SecretKind| {
+        if *kind == SecretKind::Username {
+            ValueKind::Username
+        } else {
+            ValueKind::Password
+        }
+    };
+    match (shape, kinds) {
+        (TypingShape::Single, [kind]) => Some(vec![value_kind(kind)]),
+        (TypingShape::Login, [SecretKind::Username, password])
+            if *password != SecretKind::Username =>
+        {
+            Some(vec![ValueKind::Username, ValueKind::Password])
+        }
+        _ => None,
     }
 }
 

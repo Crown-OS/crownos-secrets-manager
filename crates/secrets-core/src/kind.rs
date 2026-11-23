@@ -13,15 +13,19 @@ pub enum SecretKind {
     /// A value that a registered command gets as an environment variable.
     Env,
     Note,
+    /// A user name: the only kind that is typed into a field that is not a password field.
+    /// Last, because the vault encodes kinds by position.
+    Username,
 }
 
 impl SecretKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Password,
         Self::ApiKey,
         Self::Token,
         Self::Env,
         Self::Note,
+        Self::Username,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -31,6 +35,7 @@ impl SecretKind {
             Self::Token => "token",
             Self::Env => "env",
             Self::Note => "note",
+            Self::Username => "username",
         }
     }
 }

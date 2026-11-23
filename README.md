@@ -106,18 +106,20 @@ Not all rules apply yet:
 
 - `confirm` asks you on screen before a use. `EveryUse` asks each time; `PerSession(minutes)`
   remembers your Allow for that agent (its app key) and secret for the minutes, in memory only;
-  `Never` does not ask. The dialog is the desktop portal's Access dialog in its dangerous style:
+  `Never` does not ask. The daemon starts the root-owned `/usr/lib/crownos-portal-dialog`
+  itself (no D-Bus service is in the path; the compositor keeps synthetic input away from it):
   "Allow <agent> to use the secret “<name>”?", with the target (the template, the proxy hosts, or
   the window, app and origin) and the app key. The agent's name comes from its app key, never
   from the agent. No answer in 120 seconds is a deny. After a deny, the same agent gets no new
   dialog for 60 seconds, and while one dialog of an agent is open, its other uses are refused.
-  Without a reachable portal, the use is refused with `NeedsConfirmation`. The request loop
+  When the dialog is not installed, the use is refused with `NeedsConfirmation`. The request loop
   answers other callers while a dialog is open.
 - `targets` and `require_password_field` apply to typing only. When a binding has `Origin`
   targets, the origin must match one of them and the app id must match an `AppId` target, if there
   are any. A binding without targets allows no typing.
 - Typing does not use `confirm`. The compositor shows its dialog for each typing request, and a
-  `PerSession` answer from the portal dialog does not cover it.
+  `PerSession` answer from the daemon's dialog does not cover it.
+- Only the root-owned `/usr/bin/crownos-computer-use` may call `type_into` and `fill_login`.
 - `uses_per_minute` counts calls (`run`, `proxy_session` and the others), not the requests that
   go through one proxy session.
 
@@ -408,23 +410,29 @@ not find these:
 
 ## Typing into windows
 
-`type_into` and `fill_login` type a secret into the focused field of a window. The caller gives a
-target: the window identifier, its app id, and for a browser tab the page origin. computer-use's
-`type_secret` and `fill_login` tools fill it from the element they focus; the origin is a hint
-that the compositor shows in its dialog.
+`type_into` and `fill_login` type a secret into the focused field of a window. Only the
+installed computer-use daemon may call them; it proves the focus in the browser first. The
+caller gives the window identifier, its app id, and for a browser tab the page origin.
 
 1. The daemon checks the binding as for any use, then its `targets` (see the rules). A refusal
    comes before the compositor sees the request (`Denied`, or `OriginMismatch` for a wrong
    origin). A value longer than 4096 bytes is refused.
-2. The daemon makes one `crownos_secret_input_request_v1` for the request on
-   `crownos_secret_input_manager_v1`. It adds each value in a sealed memfd: for `fill_login` the
-   user name with Tab after it, then the password. A `Password`, `ApiKey` or `Token` secret, or a
-   binding with `require_password_field`, asks for a password field.
-3. The compositor shows its own Allow/Deny dialog that names the agent, the secrets, the window
-   and the origin. This dialog is the only confirmation for typing. After Allow it checks the
-   focus and the field, types, and sends `done` with `typed`, `focus_changed`,
-   `not_password_field`, `refused`, `cancelled`, `unknown_window`, `timed_out`,
-   `target_mismatch` or `session_locked`.
+2. The daemon finds the app key that the window must have: the system desktop entry
+   `<app id>.desktop` (in `/usr/local/share`, `/usr/share` or the Flatpak exports, never the
+   user's own), its `Exec` program as an `exe:` or `interp:` key, or `sandbox:org.flatpak/<id>`
+   for a Flatpak app. An app without such an entry, or whose program the user can change, gets
+   no typing. A browser that starts through a launcher (Arch's `/usr/bin/chromium` runs
+   `/usr/lib/chromium/chromium`) does not match yet.
+3. Only a `Username` secret is typed into a field that is not a password field. Every other kind
+   needs a password field. `fill_login` needs a `Username` secret first and another kind second.
+4. The daemon makes one `crownos_secret_input_request_v1` with the expected app key and adds
+   each value in a sealed memfd: for `fill_login` the user name with Tab after it, then the
+   password.
+5. The compositor checks the app key of the window's client and shows its own Allow/Deny dialog
+   that names the agent, the secrets, the verified app, the window and the origin. This dialog is
+   the only confirmation for typing. After Allow it checks the title, the focus and the field,
+   types, and sends `done` with `typed`, `focus_changed`, `not_password_field`, `refused`,
+   `cancelled`, `unknown_window`, `timed_out`, `target_mismatch` or `session_locked`.
 
 The daemon connects to Wayland when it starts, before it turns dumpable off, so the compositor can
 identify it. Without a compositor at that time, or when the compositor does not offer the global,

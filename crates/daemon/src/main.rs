@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result};
-use crownos_secretsd::{AcceptedProgramIdentity, SecretsService, admin, hardening};
+use crownos_secretsd::{AcceptedProgramIdentity, AdminPolicy, SecretsService, hardening};
 use secrets_protocol::secrets;
 use secrets_vault::Vault;
 use tracing_subscriber::EnvFilter;
@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
         .context("finding the data directory")?
         .join("crownos");
     let vault = Vault::new(data_directory.join("secrets.vault"));
-    let service = SecretsService::new(vault, admin::AdminPolicy::installed(), data_directory)
+    let service = SecretsService::new(vault, AdminPolicy::installed_admins(), data_directory)
         .with_typing(typing);
     let mut server =
         crownos_secretsd::server::bind_socket(None).context("binding the secrets socket")?;

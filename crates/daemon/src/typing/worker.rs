@@ -115,7 +115,7 @@ impl Worker {
         self.next_id = self.next_id.wrapping_add(1);
         let proxy = self.manager.create_request(
             request.window.clone(),
-            request.app_id.clone(),
+            request.expected_app_key.clone(),
             u32::from(request.require_password_field),
             request.agent.clone(),
             request.secret_names.clone(),

@@ -3,8 +3,11 @@
 //! owns the connection and sends one request at a time, then waits for its `done` event. When the
 //! connection breaks, the daemon exits so that systemd starts it again with a new connection.
 
+mod policy;
 mod value_fd;
 mod worker;
+
+pub use policy::TypingPolicy;
 
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Sender, channel};
@@ -40,7 +43,8 @@ impl std::fmt::Debug for TypingValue {
 #[derive(Debug)]
 pub struct TypingRequest {
     pub window: String,
-    pub app_id: String,
+    /// The verified app key that the window's client must have.
+    pub expected_app_key: String,
     pub require_password_field: bool,
     /// Display text for the compositor's dialog.
     pub agent: String,

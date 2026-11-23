@@ -18,9 +18,9 @@ use secrets_protocol::secrets::Used;
 use secrets_proxy::Proxy;
 use secrets_vault::Vault;
 
+use crate::AdminPolicy;
 use crate::Caller;
-use crate::admin::AdminPolicy;
-use crate::confirmation::{ConfirmationAsker, PortalAsker};
+use crate::confirmation::{ConfirmationAsker, DialogProcessAsker};
 use crate::util::rate::RateLimiter;
 
 pub use confirmations::Confirmation;
@@ -54,6 +54,7 @@ pub struct SecretsService {
     session_approvals: HashMap<(String, SecretName), Instant>,
     open_dialogs: HashSet<String>,
     typing: crate::typing::CompositorTyping,
+    typing_policy: crate::typing::TypingPolicy,
     run_slots: std::sync::Arc<tokio::sync::Semaphore>,
     protected_directories: Vec<PathBuf>,
 }
@@ -85,12 +86,13 @@ impl SecretsService {
             proxy_ca_hosts: None,
             next_session_id: 1,
             launcher: secrets_run::Launcher::default(),
-            asker: std::sync::Arc::new(PortalAsker),
+            asker: std::sync::Arc::new(DialogProcessAsker::installed()),
             decision: None,
             deny_cool_downs: HashMap::new(),
             session_approvals: HashMap::new(),
             open_dialogs: HashSet::new(),
             typing: crate::typing::CompositorTyping::unavailable(),
+            typing_policy: crate::typing::TypingPolicy::installed(),
             run_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(DEFAULT_CONCURRENT_RUNS)),
             protected_directories: run_calls::protected_directories(&data_directory),
             data_directory,
@@ -119,6 +121,13 @@ impl SecretsService {
     #[must_use]
     pub fn with_typing(mut self, typing: crate::typing::CompositorTyping) -> Self {
         self.typing = typing;
+        self
+    }
+
+    /// Who may ask to type and where app keys come from; the installed ones when not set.
+    #[must_use]
+    pub fn with_typing_policy(mut self, policy: crate::typing::TypingPolicy) -> Self {
+        self.typing_policy = policy;
         self
     }
 

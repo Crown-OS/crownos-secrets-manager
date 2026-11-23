@@ -23,7 +23,8 @@ use crownos_protocols::secret_input::v1::server::crownos_secret_input_request_v1
 };
 use crownos_secretsd::service::{TypingShape, TypingStart, typing_outcome};
 use crownos_secretsd::typing::CompositorTyping;
-use crownos_secretsd::{AdminPolicy, Caller, SecretsService, ServiceError};
+use crownos_secretsd::typing::TypingPolicy;
+use crownos_secretsd::{AdminPolicy, Caller, ProgramPolicy, SecretsService, ServiceError};
 use secrecy::SecretSlice;
 use secrets_core::{Binding, Confirm, SecretKind, SecretName, Target, UseOutcome, VaultSettings};
 use secrets_protocol::TypingTarget;
@@ -34,13 +35,14 @@ use wayland_server::{Client, DataInit, Dispatch, Display, DisplayHandle, GlobalD
 
 const AGENT: &str = "/usr/bin/crownos-computer-use";
 const ADMIN: &str = "/usr/bin/crownos-secrets";
+const OTHER_AGENT: &str = "/usr/bin/other-agent";
 const PASSWORD: &[u8] = b"master";
 
 /// What the fake compositor got for one committed request.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct TypedRequest {
     window: String,
-    app_id: String,
+    expected_app_key: String,
     require_password_field: u32,
     secret_names: String,
     origin: String,
@@ -84,7 +86,7 @@ impl Dispatch<CrownosSecretInputManagerV1, ()> for FakeCompositor {
         if let crownos_secret_input_manager_v1::Request::CreateRequest {
             id,
             window_identifier,
-            app_id,
+            expected_app_key,
             require_password_field,
             secret_name,
             origin,
@@ -95,7 +97,7 @@ impl Dispatch<CrownosSecretInputManagerV1, ()> for FakeCompositor {
                 id,
                 Mutex::new(TypedRequest {
                     window: window_identifier,
-                    app_id,
+                    expected_app_key,
                     require_password_field,
                     secret_names: secret_name,
                     origin,
@@ -194,8 +196,19 @@ fn service(directory: &Path, typing: CompositorTyping) -> SecretsService {
         iterations: 1,
         parallelism: 1,
     });
+    let applications = directory.join("applications");
+    std::fs::create_dir_all(&applications).unwrap();
+    std::fs::write(
+        applications.join("org.example.browser.desktop"),
+        "[Desktop Entry]\nName=Browser\nExec=true %U\n",
+    )
+    .unwrap();
     let mut service = SecretsService::new(vault, AdminPolicy::trusting(vec![ADMIN.into()]), data)
-        .with_typing(typing);
+        .with_typing(typing)
+        .with_typing_policy(TypingPolicy::new(
+            ProgramPolicy::trusting(vec![AGENT.into()]),
+            vec![applications],
+        ));
     let now = Instant::now();
     service.init(&admin(), bytes(PASSWORD), now).unwrap();
     let mut settings = VaultSettings::default();
@@ -208,8 +221,20 @@ fn service(directory: &Path, typing: CompositorTyping) -> SecretsService {
     for (secret, kind, value, targets) in [
         (
             "user",
-            SecretKind::Note,
+            SecretKind::Username,
             b"alice@example.com".to_vec(),
+            vec![app.clone()],
+        ),
+        (
+            "note",
+            SecretKind::Note,
+            b"note-planted".to_vec(),
+            vec![app.clone()],
+        ),
+        (
+            "env",
+            SecretKind::Env,
+            b"env-planted".to_vec(),
             vec![app.clone()],
         ),
         (
@@ -238,7 +263,7 @@ fn service(directory: &Path, typing: CompositorTyping) -> SecretsService {
             )
             .unwrap();
         let binding = Binding {
-            agents: vec![format!("exe:{AGENT}")],
+            agents: vec![format!("exe:{AGENT}"), format!("exe:{OTHER_AGENT}")],
             targets,
             confirm: Some(Confirm::PerSession(5)),
             ..Binding::default()
@@ -303,7 +328,12 @@ async fn the_compositor_gets_one_request_per_typing_and_only_for_a_bound_window(
         requests[0].require_password_field, 1,
         "a password kind forces a password field"
     );
-    assert_eq!(requests[0].app_id, "org.example.browser");
+    let browser_key = std::fs::canonicalize("/usr/bin/true").unwrap();
+    assert_eq!(
+        requests[0].expected_app_key,
+        format!("exe:{}", browser_key.display()),
+        "the compositor gets the key of the app's desktop entry"
+    );
     assert_eq!(requests[0].window, "window-7");
 
     let login = type_secrets(
@@ -327,20 +357,34 @@ async fn the_compositor_gets_one_request_per_typing_and_only_for_a_bound_window(
     assert_eq!(login_request.values[1], (b"hunter2-planted".to_vec(), 1, 0));
     assert_eq!(login_request.secret_names, "user, pass");
 
-    let note_as_password = type_secrets(
-        &mut service,
-        &[name("user"), name("user")],
-        &browser,
-        TypingShape::Login,
-    )
-    .await;
-    assert_eq!(note_as_password, UseOutcome::Done);
+    for user_slot in ["pass", "note", "env"] {
+        let refused = type_secrets(
+            &mut service,
+            &[name(user_slot), name("pass")],
+            &browser,
+            TypingShape::Login,
+        )
+        .await;
+        assert_eq!(refused, UseOutcome::Denied, "{user_slot} in the user slot");
+    }
+    let note = type_secrets(&mut service, &[name("note")], &browser, TypingShape::Single).await;
+    assert_eq!(note, UseOutcome::Done);
     let note_request = typed.lock().unwrap()[3].clone();
-    assert_eq!(
-        note_request.values[1].1, 1,
-        "the second login value is a password"
-    );
+    assert_eq!(note_request.values[0].1, 1, "a note needs a password field");
     assert_eq!(note_request.require_password_field, 1);
+    let user = type_secrets(&mut service, &[name("user")], &browser, TypingShape::Single).await;
+    assert_eq!(user, UseOutcome::Done);
+    let user_request = typed.lock().unwrap()[4].clone();
+    assert_eq!(
+        user_request.values[0],
+        (b"alice@example.com".to_vec(), 0, 0)
+    );
+    assert_eq!(user_request.require_password_field, 0);
+    assert_eq!(
+        typed.lock().unwrap().len(),
+        5,
+        "a refused login reached the compositor"
+    );
 
     outcomes.lock().unwrap().push_back(Outcome::TimedOut);
     let timed_out =
@@ -380,6 +424,28 @@ async fn the_compositor_gets_one_request_per_typing_and_only_for_a_bound_window(
     );
     let huge = type_secrets(&mut service, &[name("huge")], &browser, TypingShape::Single).await;
     assert_eq!(huge, UseOutcome::Denied);
+    let no_desktop_entry = type_secrets(
+        &mut service,
+        &[name("pass")],
+        &target("org.example.unlisted", None),
+        TypingShape::Single,
+    )
+    .await;
+    assert_eq!(no_desktop_entry, UseOutcome::Denied);
+    let direct = service
+        .start_typing(
+            &Caller::from_executable(Path::new(OTHER_AGENT)),
+            &[name("pass")],
+            &browser,
+            TypingShape::Single,
+            "test",
+            Instant::now(),
+        )
+        .unwrap();
+    assert!(
+        matches!(direct, TypingStart::Refused(UseOutcome::Denied)),
+        "a caller other than computer-use typed"
+    );
     assert_eq!(
         typed.lock().unwrap().len(),
         reached,

@@ -28,11 +28,10 @@ rustix = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 wayland-client = { workspace = true }
-zbus = { workspace = true }
 
 [dev-dependencies]
 crownos-protocols = { workspace = true, features = ["server"] }

@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use crownos_ipc::Pending;
-use crownos_secretsd::{AcceptedProgramIdentity, AdminPolicy, SecretsService};
+use crownos_secretsd::typing::TypingPolicy;
+use crownos_secretsd::{AcceptedProgramIdentity, AdminPolicy, ProgramPolicy, SecretsService};
 use secrets_core::{
     Binding, Confirm, HttpBinding, RunTemplate, SecretKind, SecretName, Target, TemplateName,
     UseOutcome,
@@ -81,6 +82,17 @@ fn start_daemon(
             .finish();
         let _default = tracing::subscriber::set_default(subscriber);
         let data_directory = vault_path.with_extension("data");
+        let applications = vault_path.with_extension("applications");
+        std::fs::create_dir_all(&applications).unwrap();
+        std::fs::write(
+            applications.join("org.example.browser.desktop"),
+            "[Desktop Entry]\nExec=true\n",
+        )
+        .unwrap();
+        let typing_policy = TypingPolicy::new(
+            ProgramPolicy::trusting(vec![PathBuf::from(&admin)]),
+            vec![applications],
+        );
         let vault = Vault::new(vault_path).with_kdf_params(KdfParams {
             memory_kib: 64,
             iterations: 1,
@@ -96,7 +108,8 @@ fn start_daemon(
             bwrap: PathBuf::from("/nonexistent/bwrap"),
             ..Launcher::default()
         }))
-        .with_upstream_roots(rustls::RootCertStore::empty());
+        .with_upstream_roots(rustls::RootCertStore::empty())
+        .with_typing_policy(typing_policy);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

@@ -1,13 +1,13 @@
 //! The on-screen question before a secret is used: "Allow <agent> to use the secret …?"
 
-mod portal;
+mod dialog_process;
 
 use std::future::Future;
 use std::pin::Pin;
 
 use secrets_core::SecretName;
 
-pub use portal::PortalAsker;
+pub use dialog_process::DialogProcessAsker;
 
 /// How long the user has to answer; no answer is a deny.
 pub const ANSWER_TIME: std::time::Duration = std::time::Duration::from_secs(120);
@@ -59,13 +59,13 @@ pub enum Verdict {
     Granted,
     /// A deny, or no answer within [`ANSWER_TIME`].
     Denied,
-    /// No portal could show the dialog.
+    /// No dialog could show.
     Unreachable,
 }
 
 pub type VerdictFuture = Pin<Box<dyn Future<Output = Verdict> + Send>>;
 
-/// Shows the dialog. The portal in the session; tests give their own answers.
+/// Shows the dialog: the consent dialog process in the session; tests give their own answers.
 pub trait ConfirmationAsker: Send + Sync {
     fn ask(&self, request: DialogRequest) -> VerdictFuture;
 }

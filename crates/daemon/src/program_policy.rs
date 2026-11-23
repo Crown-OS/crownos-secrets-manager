@@ -1,5 +1,5 @@
-//! Which programs may call the admin methods. The master password is the first gate; this is
-//! the second.
+//! Which programs may call a group of methods: the admin methods, where the master password is
+//! the first gate and this the second, and the typing methods, which only computer-use calls.
 
 use std::path::PathBuf;
 
@@ -9,14 +9,17 @@ use crate::Caller;
 
 const INSTALLED_ADMIN_EXECUTABLES: [&str; 2] =
     ["/usr/bin/crownos-secrets", "/usr/bin/crownos-settings"];
+const INSTALLED_TYPING_CALLERS: [&str; 1] = ["/usr/bin/crownos-computer-use"];
 
-/// Debug builds also accept the paths in this variable, separated by `:`, without the
+/// Debug builds also accept the paths in these variables, separated by `:`, without the
 /// root-owned check.
 #[cfg(debug_assertions)]
 pub const DEBUG_ADMIN_EXECUTABLES_VARIABLE: &str = "CROWNOS_SECRETS_DEBUG_ADMIN_EXECUTABLES";
+#[cfg(debug_assertions)]
+pub const DEBUG_TYPING_CALLERS_VARIABLE: &str = "CROWNOS_SECRETS_DEBUG_TYPING_CALLERS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TrustedAdmin {
+struct TrustedProgram {
     path: PathBuf,
     /// The file and its directory must be owned by root and not writable by others, so no
     /// process of the user can put another program there.
@@ -24,27 +27,44 @@ struct TrustedAdmin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AdminPolicy {
-    trusted: Vec<TrustedAdmin>,
+pub struct ProgramPolicy {
+    trusted: Vec<TrustedProgram>,
 }
 
-impl AdminPolicy {
+impl ProgramPolicy {
     /// The installed CLI and Settings app, which must be root-owned.
-    pub fn installed() -> Self {
-        let mut trusted: Vec<TrustedAdmin> = INSTALLED_ADMIN_EXECUTABLES
+    pub fn installed_admins() -> Self {
+        Self::installed(
+            &INSTALLED_ADMIN_EXECUTABLES,
+            #[cfg(debug_assertions)]
+            DEBUG_ADMIN_EXECUTABLES_VARIABLE,
+        )
+    }
+
+    /// The installed computer-use daemon, which must be root-owned.
+    pub fn installed_typing_callers() -> Self {
+        Self::installed(
+            &INSTALLED_TYPING_CALLERS,
+            #[cfg(debug_assertions)]
+            DEBUG_TYPING_CALLERS_VARIABLE,
+        )
+    }
+
+    fn installed(paths: &[&str], #[cfg(debug_assertions)] debug_variable: &str) -> Self {
+        let mut trusted: Vec<TrustedProgram> = paths
             .iter()
-            .map(|path| TrustedAdmin {
+            .map(|path| TrustedProgram {
                 path: PathBuf::from(path),
                 must_be_root_owned: true,
             })
             .collect();
         #[cfg(debug_assertions)]
-        if let Ok(extra) = std::env::var(DEBUG_ADMIN_EXECUTABLES_VARIABLE) {
+        if let Ok(extra) = std::env::var(debug_variable) {
             trusted.extend(
                 extra
                     .split(':')
                     .filter(|path| !path.is_empty())
-                    .map(|path| TrustedAdmin {
+                    .map(|path| TrustedProgram {
                         path: PathBuf::from(path),
                         must_be_root_owned: false,
                     }),
@@ -58,7 +78,7 @@ impl AdminPolicy {
         Self {
             trusted: paths
                 .into_iter()
-                .map(|path| TrustedAdmin {
+                .map(|path| TrustedProgram {
                     path,
                     must_be_root_owned: false,
                 })
@@ -83,8 +103,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_script_or_another_program_is_never_admin() {
-        let policy = AdminPolicy::trusting(vec![PathBuf::from("/usr/bin/crownos-secrets")]);
+    fn a_script_or_another_program_is_never_trusted() {
+        let policy = ProgramPolicy::trusting(vec![PathBuf::from("/usr/bin/crownos-secrets")]);
         assert!(policy.allows(&Caller::from_executable(Path::new(
             "/usr/bin/crownos-secrets"
         ))));
@@ -100,8 +120,8 @@ mod tests {
     #[test]
     fn an_installed_path_must_be_root_owned() {
         let own = std::env::current_exe().unwrap_or_default();
-        let policy = AdminPolicy {
-            trusted: vec![TrustedAdmin {
+        let policy = ProgramPolicy {
+            trusted: vec![TrustedProgram {
                 path: own.clone(),
                 must_be_root_owned: true,
             }],
