@@ -1,11 +1,14 @@
-//! The question through the root-owned `crownos-portal-dialog`, started directly. The
-//! compositor keeps synthetic input away from that executable's dialog, and no D-Bus service is
-//! in the path.
+//! The question through the root-owned `crownos-portal-dialog`. It runs in a transient user
+//! service (`systemd-run --user --pipe --wait --collect`) with limits of its own, not as a child
+//! that inherits the daemon's strict ones. The daemon owns the pipe the answer comes back on;
+//! the compositor keeps synthetic input away from that executable's dialog.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crownos_config::schema::AppKey;
+use secrets_run::Launcher;
 use tokio::process::Command;
 
 use super::{ANSWER_TIME, ConfirmationAsker, DialogRequest, Verdict, VerdictFuture};
@@ -18,10 +21,19 @@ const DIALOG_OVERRIDE_VARIABLE: &str = "CROWN_CONSENT_DIALOG";
 /// The id of the Allow button, which the dialog prints when it is pressed.
 const GRANT: &str = "grant";
 
+/// The dialog's own limits. It draws with the GPU, so it gets no `MemoryDenyWriteExecute`.
+const DIALOG_PROPERTIES: [&str; 4] = [
+    "MemoryMax=1G",
+    "NoNewPrivileges=yes",
+    "RuntimeMaxSec=130",
+    "CollectMode=inactive-or-failed",
+];
+
 #[derive(Debug, Clone)]
 pub struct DialogProcessAsker {
     executable: PathBuf,
     must_be_root_owned: bool,
+    launcher: Launcher,
 }
 
 impl DialogProcessAsker {
@@ -31,19 +43,22 @@ impl DialogProcessAsker {
             return Self {
                 executable: PathBuf::from(path),
                 must_be_root_owned: false,
+                launcher: Launcher::default(),
             };
         }
         Self {
             executable: PathBuf::from(INSTALLED_DIALOG),
             must_be_root_owned: true,
+            launcher: Launcher::default(),
         }
     }
 
-    /// This dialog, without the root-owned check: for tests and tools.
-    pub const fn trusting(executable: PathBuf) -> Self {
+    /// This dialog through this user manager, without the root-owned check: for tests and tools.
+    pub const fn trusting(executable: PathBuf, launcher: Launcher) -> Self {
         Self {
             executable,
             must_be_root_owned: false,
+            launcher,
         }
     }
 
@@ -60,46 +75,103 @@ impl DialogProcessAsker {
 impl ConfirmationAsker for DialogProcessAsker {
     fn ask(&self, request: DialogRequest) -> VerdictFuture {
         let trusted = self.is_trusted();
-        let executable = self.executable.clone();
+        let asker = self.clone();
         Box::pin(async move {
             if !trusted {
-                tracing::warn!(dialog = %executable.display(), "the consent dialog is not installed");
+                tracing::warn!(dialog = %asker.executable.display(), "the consent dialog is not installed");
                 return Verdict::Unreachable;
             }
-            ask(&executable, &request).await
+            asker.ask_in_service(&request).await
         })
     }
 }
 
-/// Runs the dialog and waits up to [`ANSWER_TIME`]; the dialog is killed when no answer came.
-async fn ask(executable: &Path, request: &DialogRequest) -> Verdict {
-    let spawned = Command::new(executable)
-        .args(["--icon", "warning"])
-        .args(["--title", &request.title(), "--message", &request.body()])
-        .args(["--cancel", "Deny", "--choice"])
-        .arg(format!("{GRANT}=Allow"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn();
-    let child = match spawned {
-        Ok(child) => child,
-        Err(error) => {
-            tracing::warn!(%error, "cannot start the consent dialog");
-            return Verdict::Unreachable;
+impl DialogProcessAsker {
+    /// Runs the dialog in a transient service and waits up to [`ANSWER_TIME`]; the service is
+    /// stopped when no answer came.
+    async fn ask_in_service(&self, request: &DialogRequest) -> Verdict {
+        static NEXT_DIALOG: AtomicU64 = AtomicU64::new(1);
+        let unit = format!(
+            "crownos-secrets-dialog-{}-{}",
+            std::process::id(),
+            NEXT_DIALOG.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut command = Command::new(&self.launcher.systemd_run);
+        command
+            .env_clear()
+            .envs(self.launcher.user_manager_environment())
+            .args(["--user", "--pipe", "--wait", "--collect", "--quiet"])
+            .arg(format!("--unit={unit}"));
+        for property in DIALOG_PROPERTIES {
+            command.arg("--property").arg(property);
         }
-    };
-    match tokio::time::timeout(ANSWER_TIME, child.wait_with_output()).await {
-        Ok(Ok(output)) if output.status.success() && last_line(&output.stdout) == Some(GRANT) => {
-            Verdict::Granted
+        if let Some(display) = std::env::var_os("WAYLAND_DISPLAY") {
+            let mut setting = std::ffi::OsString::from("--setenv=WAYLAND_DISPLAY=");
+            setting.push(display);
+            command.arg(setting);
         }
-        Ok(Ok(_)) | Err(_) => Verdict::Denied,
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "the consent dialog failed");
-            Verdict::Unreachable
+        command
+            .arg("--")
+            .arg(&self.executable)
+            .args(dialog_arguments(request))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                tracing::warn!(%error, "cannot start the consent dialog");
+                return Verdict::Unreachable;
+            }
+        };
+        match tokio::time::timeout(ANSWER_TIME, child.wait_with_output()).await {
+            Ok(Ok(output))
+                if output.status.success() && last_line(&output.stdout) == Some(GRANT) =>
+            {
+                Verdict::Granted
+            }
+            Ok(Ok(_)) => Verdict::Denied,
+            Err(_) => {
+                self.stop(&unit).await;
+                Verdict::Denied
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "the consent dialog failed");
+                Verdict::Unreachable
+            }
         }
     }
+
+    async fn stop(&self, unit: &str) {
+        let stopped = Command::new(&self.launcher.systemctl)
+            .env_clear()
+            .envs(self.launcher.user_manager_environment())
+            .args(["--user", "stop", unit])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        if let Err(error) = stopped {
+            tracing::warn!(%error, "cannot stop an unanswered consent dialog");
+        }
+    }
+}
+
+fn dialog_arguments(request: &DialogRequest) -> Vec<String> {
+    vec![
+        "--icon".into(),
+        "warning".into(),
+        "--title".into(),
+        request.title(),
+        "--message".into(),
+        request.body(),
+        "--cancel".into(),
+        "Deny".into(),
+        "--choice".into(),
+        format!("{GRANT}=Allow"),
+    ]
 }
 
 fn last_line(output: &[u8]) -> Option<&str> {
@@ -126,6 +198,7 @@ mod tests {
         let asker = DialogProcessAsker {
             executable: std::env::current_exe().unwrap_or_default(),
             must_be_root_owned: true,
+            launcher: Launcher::default(),
         };
         assert!(!asker.is_trusted());
     }

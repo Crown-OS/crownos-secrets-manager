@@ -106,8 +106,9 @@ Not all rules apply yet:
 
 - `confirm` asks you on screen before a use. `EveryUse` asks each time; `PerSession(minutes)`
   remembers your Allow for that agent (its app key) and secret for the minutes, in memory only;
-  `Never` does not ask. The daemon starts the root-owned `/usr/lib/crownos-portal-dialog`
-  itself (no D-Bus service is in the path; the compositor keeps synthetic input away from it):
+  `Never` does not ask. The daemon starts the root-owned `/usr/lib/crownos-portal-dialog` in a
+  transient user service (`systemd-run --user --pipe --wait --collect`, 1 GiB, 130 s) and reads
+  the answer from the pipe it owns; the compositor keeps synthetic input away from the dialog:
   "Allow <agent> to use the secret “<name>”?", with the target (the template, the proxy hosts, or
   the window, app and origin) and the app key. The agent's name comes from its app key, never
   from the agent. No answer in 120 seconds is a deny. After a deny, the same agent gets no new

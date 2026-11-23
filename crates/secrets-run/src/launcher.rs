@@ -58,7 +58,7 @@ impl Launcher {
     }
 
     /// Only the address of the user manager; nothing else of the daemon's environment goes on.
-    pub(crate) fn user_manager_environment(&self) -> [(&'static str, String); 2] {
+    pub fn user_manager_environment(&self) -> [(&'static str, String); 2] {
         let runtime = self.user_runtime_directory.to_string_lossy().into_owned();
         [
             (
