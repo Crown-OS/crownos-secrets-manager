@@ -224,12 +224,7 @@ fn service(directory: &Path, typing: CompositorTyping) -> SecretsService {
             b"site-planted".to_vec(),
             vec![app.clone(), site],
         ),
-        (
-            "huge",
-            SecretKind::Note,
-            vec![b'x'; 5000],
-            vec![app],
-        ),
+        ("huge", SecretKind::Note, vec![b'x'; 5000], vec![app]),
     ] {
         let value: &'static [u8] = Box::leak(value.into_boxed_slice());
         service

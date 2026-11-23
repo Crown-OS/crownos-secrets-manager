@@ -253,5 +253,9 @@ fn a_peer_that_leaves_during_the_dialog_gets_nothing_and_the_next_peer_is_asked_
     asker.answer(Verdict::Granted, Duration::ZERO);
     let reply = session(&mut next);
     assert!(matches!(reply, ProxySessionReply::Started(_)), "{reply:?}");
-    assert_eq!(asker.asked().len(), 2, "the gone peer's answer was used again");
+    assert_eq!(
+        asker.asked().len(),
+        2,
+        "the gone peer's answer was used again"
+    );
 }
