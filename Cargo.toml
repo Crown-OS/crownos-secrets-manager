@@ -5,6 +5,8 @@ members = [
     "crates/secrets-vault",
     "crates/secrets-protocol",
     "crates/daemon",
+    "crates/cli",
+    "crates/mcp",
 ]
 
 [workspace.package]

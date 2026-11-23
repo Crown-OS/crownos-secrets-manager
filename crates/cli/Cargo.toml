@@ -1,0 +1,26 @@
+[package]
+name = "crownos-secrets"
+description = "The CLI of the CrownOS secrets manager: add, list, bind, remove, lock, unlock, status and audit. It never shows a value"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "crownos-secrets"
+path = "src/main.rs"
+
+[dependencies]
+secrets-core = { workspace = true }
+secrets-protocol = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+crownos-ipc = { workspace = true }
+rpassword = { workspace = true }
+serde = { workspace = true }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true
