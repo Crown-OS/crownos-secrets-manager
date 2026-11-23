@@ -4,6 +4,7 @@ mod admin_calls;
 mod agent_calls;
 mod error;
 mod proxy_calls;
+mod run_calls;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,6 +37,7 @@ pub struct SecretsService {
     upstream_roots: Option<rustls::RootCertStore>,
     proxy: Option<Proxy>,
     next_session_id: u64,
+    bwrap: PathBuf,
 }
 
 impl std::fmt::Debug for SecretsService {
@@ -64,7 +66,15 @@ impl SecretsService {
             upstream_roots: None,
             proxy: None,
             next_session_id: 1,
+            bwrap: PathBuf::from(secrets_run::BWRAP),
         }
+    }
+
+    /// The bubblewrap that run templates use; `/usr/bin/bwrap` when not set.
+    #[must_use]
+    pub fn with_bwrap(mut self, bwrap: PathBuf) -> Self {
+        self.bwrap = bwrap;
+        self
     }
 
     /// The CAs that the proxy trusts for the real hosts; the system store when not set.

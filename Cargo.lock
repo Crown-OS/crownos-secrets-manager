@@ -509,6 +509,7 @@ dependencies = [
  "secrets-core",
  "secrets-protocol",
  "secrets-proxy",
+ "secrets-run",
  "secrets-vault",
  "serde",
  "tempfile",
@@ -1601,6 +1602,19 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "secrets-run"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "secrecy",
+ "secrets-core",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "zeroize",
 ]
 

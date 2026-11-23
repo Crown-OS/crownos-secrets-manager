@@ -1,0 +1,24 @@
+[package]
+name = "secrets-run"
+description = "Runs registered command templates in bubblewrap with secrets in the environment, and scrubs their output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+secrets-core = { workspace = true }
+
+secrecy = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "time", "macros", "rt"] }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "time", "macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

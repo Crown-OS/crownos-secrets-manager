@@ -5,6 +5,7 @@ members = [
     "crates/secrets-vault",
     "crates/secrets-protocol",
     "crates/secrets-proxy",
+    "crates/secrets-run",
     "crates/daemon",
     "crates/cli",
     "crates/mcp",
@@ -22,6 +23,7 @@ secrets-core = { path = "crates/secrets-core" }
 secrets-vault = { path = "crates/secrets-vault" }
 secrets-protocol = { path = "crates/secrets-protocol" }
 secrets-proxy = { path = "crates/secrets-proxy" }
+secrets-run = { path = "crates/secrets-run" }
 crownos-ipc = { path = "../crownos-ipc" }
 
 anyhow = "1.0.100"

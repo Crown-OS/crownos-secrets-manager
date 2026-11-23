@@ -11,7 +11,7 @@ pkgdesc="The CrownOS secrets manager: agents use secrets by name and never read 
 arch=(x86_64)
 url="https://github.com/Crown-OS/crownos-secrets-manager"
 license=('MIT OR Apache-2.0')
-depends=(glibc gcc-libs systemd)
+depends=(glibc gcc-libs systemd bubblewrap)
 makedepends=(cargo)
 options=(!lto !debug)
 

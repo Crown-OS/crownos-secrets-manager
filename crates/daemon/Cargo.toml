@@ -15,6 +15,7 @@ path = "src/main.rs"
 secrets-core = { workspace = true }
 secrets-protocol = { workspace = true }
 secrets-proxy = { workspace = true }
+secrets-run = { workspace = true }
 secrets-vault = { workspace = true }
 
 anyhow = { workspace = true }

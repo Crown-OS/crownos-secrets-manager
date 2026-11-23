@@ -5,7 +5,7 @@ use secrets_protocol::secrets;
 use secrets_vault::Vault;
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))

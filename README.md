@@ -23,6 +23,7 @@ user. A program that runs as your user and searches on purpose can find a value.
 | `crates/secrets-vault` | | The encrypted vault file with values and rules, lock and unlock |
 | `crates/secrets-protocol` | | The crownos-ipc contract and the pipe that carries a value to the daemon |
 | `crates/secrets-proxy` | | The HTTPS proxy that adds API keys to requests and scrubs the responses |
+| `crates/secrets-run` | | Runs a registered template in bubblewrap and scrubs its output |
 | `crates/daemon` | `crownos-secretsd` | The daemon: one per session, as the `crownos-secretsd` user service |
 | `crates/cli` | `crownos-secrets` | The CLI for you |
 | `crates/mcp` | `crownos-secrets-mcp` | The stdio MCP server for agents |
@@ -205,6 +206,41 @@ Limits: the request body goes to the host unchanged, so a placeholder in a body 
 A value that the host echoes in an encoding that the scrubber does not know reaches the agent (see
 [The scrubber](#the-scrubber)). HTTP/2 is not offered; clients fall back to HTTP/1.1.
 
+## Run templates (S3)
+
+`secrets_run` (the `run` call) starts a template that the user registered with
+`crownos-secrets template-set`. A template has a command, the environment variables that it gets
+from secrets (at least one), the hosts it needs, a `cwd_glob`, and limits. The daemon refuses:
+
+- a template that does not exist (`Unknown`), or a caller that a secret's binding does not name
+  (`Denied`)
+- extra arguments, unless `allow_arguments` is set
+- a working directory that does not match `cwd_glob`. The check uses the canonical path, so `..`
+  and symbolic links cannot leave the pattern. Without a `cwd_glob`, the command runs in an empty
+  `/tmp` and the caller gives no directory.
+- any run when `/usr/bin/bwrap` is not installed (`SandboxMissing`)
+
+The sandbox is bubblewrap with:
+
+- new pid, ipc, uts and cgroup namespaces, `--die-with-parent` and `--new-session`
+- a read-only `/usr` and `/etc`, a new `/proc`, `/dev` and `/tmp`, and nothing of your home
+  except the working directory (read-only unless `cwd_writable`)
+- no network when the template names no hosts (`--unshare-net`). When it names hosts, the command
+  shares the network of the daemon: the host list is not an allow list yet.
+- an empty environment except `PATH`, `HOME=/tmp`, `LANG` and the template variables
+- `/usr/bin/sh` in the sandbox (it puts `/dev/null` on standard input)
+
+bwrap reads its options, with the values, from a pipe on its standard input (`--args 0`), so no
+value shows in `/proc/<pid>/cmdline`. A pipe, not an inherited file, keeps the values of one run
+away from a command of another run. A shell in the sandbox gives the command `/dev/null` as its
+standard input; the command and the arguments stay separate words, not shell text. The command
+itself gets the values in its environment, so a process of your user can read them from
+`/proc/<pid>/environ` while it runs.
+
+stdout and stderr go through a scrubber with every value in the vault, as they stream. A run stops
+at `timeout_seconds` and at `max_output_bytes`, and the reply says so. While a run goes on, the
+daemon answers no other request.
+
 ## Hardening
 
 - The daemon sets `PR_SET_DUMPABLE=0` at start. There is no core dump. A process of your user
@@ -215,7 +251,9 @@ A value that the host echoes in an encoding that the scrubber does not know reac
   lock, the daemon logs this one time.
 - The user unit sets `LimitCORE=0`, `MemorySwapMax=0`, `MemoryMax=384M`, `NoNewPrivileges=yes`,
   `UMask=0077`, `LockPersonality=yes`, `SystemCallArchitectures=native` and limits on address
-  families (Unix and IP, for the proxy), namespaces and system calls.
+  families (Unix, IP for the proxy, netlink for bwrap), namespaces (only those that bwrap makes)
+  and system calls (`@system-service @mount`). `MemoryDenyWriteExecute=` stays off, because
+  sandboxed commands get it too and JIT runtimes need it off.
 - The unit does not use `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=` or `ReadWritePaths=`. In a
   user unit, each of these puts the daemon in a new user namespace. Reading `/proc/<pid>/exe` of a
   caller is a ptrace-read check, and the kernel refuses it across user namespaces. Also, your user
@@ -293,9 +331,6 @@ not find these:
 
 ## Plan
 
-- **S3: sandboxed run templates.** `run` starts a registered template in bubblewrap with its own
-  pid, ipc and uts namespaces. The environment comes from the vault. The scrubber cleans the
-  output.
 - **S4: typing through the compositor.** A new `crownos_secret_input_v1` protocol in
   crownos-protocols, which only `crownos-secretsd` can bind. The compositor shows a confirmation
   that names the agent, the secret, the window and the origin, and ignores synthetic input on it.

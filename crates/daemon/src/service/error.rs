@@ -27,6 +27,8 @@ pub enum ServiceError {
     Transfer(#[from] TransferError),
     #[error("proxy: {0}")]
     Proxy(String),
+    #[error("sandbox: {0}")]
+    Sandbox(String),
 }
 
 impl From<VaultError> for ServiceError {
@@ -47,7 +49,9 @@ impl From<ServiceError> for RemoteError {
             ServiceError::UnknownSecret(_) => error_code::UNKNOWN_SECRET,
             ServiceError::Invalid(_) | ServiceError::Transfer(_) => error_code::INVALID_ARGUMENT,
             ServiceError::RateLimited | ServiceError::TooManyRequests => error_code::RATE_LIMITED,
-            ServiceError::Vault(_) | ServiceError::Proxy(_) => error_code::VAULT,
+            ServiceError::Vault(_) | ServiceError::Proxy(_) | ServiceError::Sandbox(_) => {
+                error_code::VAULT
+            }
         };
         Self::new(code, error.to_string())
     }

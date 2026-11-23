@@ -85,9 +85,11 @@ impl Default for RunTemplate {
 impl RunTemplate {
     /// # Errors
     ///
-    /// Fails without a command, or with a zero time or output limit.
+    /// Fails without a command, without a secret in the environment, or with a zero time or
+    /// output limit.
     pub fn validate(&self) -> Result<(), crate::CoreError> {
         if self.command.first().is_none_or(String::is_empty)
+            || self.environment.is_empty()
             || self.timeout_seconds == 0
             || self.max_output_bytes == 0
         {

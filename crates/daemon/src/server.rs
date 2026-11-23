@@ -143,20 +143,12 @@ impl Handler for PeerRequests<'_> {
     fn run(
         &mut self,
         template: TemplateName,
-        _arguments: Vec<String>,
-        _cwd: String,
+        arguments: Vec<String>,
+        cwd: String,
     ) -> Result<RunReply, RemoteError> {
-        let now = Instant::now();
-        let Some(names) = self.service.template_secret_names(&template, now) else {
-            return Ok(RunReply::Refused(UseOutcome::Unknown));
-        };
-        match self
-            .service
-            .use_secrets(self.caller, &names, &format!("run:{template}"), now)
-        {
-            Ok(outcome) => Ok(RunReply::Refused(outcome)),
-            Err(error) => Err(error.into()),
-        }
+        self.service
+            .run(self.caller, &template, &arguments, &cwd, Instant::now())
+            .map_err(Into::into)
     }
 
     fn proxy_session(

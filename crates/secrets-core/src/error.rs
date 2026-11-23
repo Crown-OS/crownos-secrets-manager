@@ -13,6 +13,6 @@ pub enum CoreError {
     EmptyTarget,
     #[error("an HTTP binding needs a host, a header name and a format that contains {{value}}")]
     InvalidHttpBinding,
-    #[error("a run template needs a command, and limits above zero")]
+    #[error("a run template needs a command, at least one secret, and limits above zero")]
     InvalidRunTemplate,
 }

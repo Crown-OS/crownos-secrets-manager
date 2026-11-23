@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use secrets_core::{SecretKind, SecretName, TemplateName, UseOutcome};
+use secrets_core::{SecretKind, SecretName, UseOutcome};
 use secrets_protocol::secrets::Used;
 use secrets_protocol::{RequestId, SecretMeta, SecretRequest, TemplateMeta, VaultStatus};
 
@@ -161,19 +161,6 @@ impl SecretsService {
                 Err(ServiceError::Unavailable)
             }
         }
-    }
-
-    pub(crate) fn template_secret_names(
-        &mut self,
-        template: &TemplateName,
-        now: Instant,
-    ) -> Option<Vec<SecretName>> {
-        let contents = self.vault.contents(now).ok()?;
-        contents
-            .rules()
-            .run_templates
-            .get(template)
-            .map(|template| template.environment.values().cloned().collect())
     }
 
     fn check_use(&mut self, caller: &Caller, names: &[SecretName], now: Instant) -> UseCheck {
