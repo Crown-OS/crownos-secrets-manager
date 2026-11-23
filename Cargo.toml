@@ -20,7 +20,6 @@ repository = "https://github.com/crown-os/crownos-secrets-manager"
 secrets-core = { path = "crates/secrets-core" }
 secrets-vault = { path = "crates/secrets-vault" }
 secrets-protocol = { path = "crates/secrets-protocol" }
-crownos-config = { path = "../crownos-config", default-features = false }
 crownos-ipc = { path = "../crownos-ipc" }
 
 anyhow = "1.0.100"
@@ -42,6 +41,7 @@ rustix = { version = "1", default-features = false, features = ["std", "fs", "pi
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 getrandom = "0.3"
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
 secrecy = "0.10.3"
 zeroize = "1.8"
 region = "3.0.2"

@@ -17,7 +17,6 @@ secrets-protocol = { workspace = true }
 secrets-vault = { workspace = true }
 
 anyhow = { workspace = true }
-crownos-config = { workspace = true }
 crownos-ipc = { workspace = true, features = ["tokio"] }
 dirs = { workspace = true }
 rustix = { workspace = true }

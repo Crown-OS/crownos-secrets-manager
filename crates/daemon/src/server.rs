@@ -7,23 +7,29 @@ use std::time::{Duration, Instant};
 
 use crownos_ipc::adapter::tokio::serve_with_outbox;
 use crownos_ipc::{Message, PeerId, RemoteError, Server};
-use secrets_core::{Binding, SecretKind, SecretName, UseOutcome};
+use secrets_core::{
+    Binding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome, VaultSettings,
+};
 use secrets_protocol::secrets::{self, Handler};
 use secrets_protocol::transfer::read_value;
-use secrets_protocol::{RequestId, SecretMeta, VaultStatus};
+use secrets_protocol::{
+    ProxySessionReply, RequestId, RunReply, SecretMeta, TemplateMeta, VaultStatus,
+};
 
-use crate::{Caller, ConfigStore, IdentifyCaller, SecretsService, ServiceError};
+use crate::util::caller_text::sanitized;
+use crate::{Caller, IdentifyCaller, SecretsService};
 
 const LOCK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_WINDOW_CHARACTERS: usize = 128;
 
 /// Serves until the socket fails.
 ///
 /// # Errors
 ///
 /// Fails when the listening socket fails.
-pub async fn serve<Store: ConfigStore, Identity: IdentifyCaller>(
+pub async fn serve<Identity: IdentifyCaller>(
     server: &mut Server,
-    service: SecretsService<Store>,
+    service: SecretsService,
     identity: Identity,
 ) -> Result<(), crownos_ipc::Error> {
     let service = RefCell::new(service);
@@ -31,9 +37,12 @@ pub async fn serve<Store: ConfigStore, Identity: IdentifyCaller>(
     serve_with_outbox(
         server,
         |server, peer, message| {
-            if let Ok(mut service) = service.try_borrow_mut() {
-                dispatch(&mut service, &identity, server, peer, message)?;
-            }
+            let mut service = service.try_borrow_mut().map_err(|_| {
+                crownos_ipc::Error::Io(std::io::Error::other(
+                    "a request arrived while the service was busy; stopping instead of dropping it",
+                ))
+            })?;
+            dispatch(&mut service, &identity, server, peer, message)?;
             Ok(true)
         },
         |context| lock_checks.poll_tick(context).map(|_| Some(())),
@@ -46,8 +55,8 @@ pub async fn serve<Store: ConfigStore, Identity: IdentifyCaller>(
     .await
 }
 
-fn dispatch<Store: ConfigStore, Identity: IdentifyCaller>(
-    service: &mut SecretsService<Store>,
+fn dispatch<Identity: IdentifyCaller>(
+    service: &mut SecretsService,
     identity: &Identity,
     server: &mut Server,
     peer: PeerId,
@@ -71,30 +80,26 @@ fn dispatch<Store: ConfigStore, Identity: IdentifyCaller>(
     Ok(())
 }
 
-struct PeerRequests<'request, Store> {
-    service: &'request mut SecretsService<Store>,
+struct PeerRequests<'request> {
+    service: &'request mut SecretsService,
     caller: &'request Caller,
 }
 
-impl<Store: ConfigStore> PeerRequests<'_, Store> {
-    fn use_secrets(
-        &mut self,
-        names: &[SecretName],
-        target: &str,
-    ) -> Result<UseOutcome, RemoteError> {
-        self.service
-            .use_secrets(self.caller, names, target, Instant::now())
-            .map_err(Into::into)
-    }
+fn window_target(window: &str) -> String {
+    format!("window:{}", sanitized(window, MAX_WINDOW_CHARACTERS))
 }
 
-impl<Store: ConfigStore> Handler for PeerRequests<'_, Store> {
+impl Handler for PeerRequests<'_> {
     fn status(&mut self) -> Result<VaultStatus, RemoteError> {
-        Ok(self.service.status(Instant::now()))
+        Ok(self.service.status(self.caller, Instant::now()))
     }
 
     fn list(&mut self) -> Result<Vec<SecretMeta>, RemoteError> {
-        Ok(self.service.list())
+        self.service.list(Instant::now()).map_err(Into::into)
+    }
+
+    fn templates(&mut self) -> Result<Vec<TemplateMeta>, RemoteError> {
+        self.service.templates(Instant::now()).map_err(Into::into)
     }
 
     fn request(
@@ -109,7 +114,14 @@ impl<Store: ConfigStore> Handler for PeerRequests<'_, Store> {
     }
 
     fn type_into(&mut self, name: SecretName, window: String) -> Result<UseOutcome, RemoteError> {
-        self.use_secrets(&[name], &format!("window:{window}"))
+        self.service
+            .use_secrets(
+                self.caller,
+                &[name],
+                &window_target(&window),
+                Instant::now(),
+            )
+            .map_err(Into::into)
     }
 
     fn fill_login(
@@ -118,49 +130,62 @@ impl<Store: ConfigStore> Handler for PeerRequests<'_, Store> {
         password: SecretName,
         window: String,
     ) -> Result<UseOutcome, RemoteError> {
-        self.use_secrets(&[password], &format!("window:{window}"))
-    }
-
-    fn run(&mut self, template: String) -> Result<UseOutcome, RemoteError> {
         self.service
-            .run_template(self.caller, &template, Instant::now())
-            .map_err(Into::into)
-    }
-
-    fn proxy_session(&mut self, names: Vec<SecretName>) -> Result<UseOutcome, RemoteError> {
-        self.use_secrets(&names, "http-session")
-    }
-
-    fn revoke_session(&mut self, _session: u64) -> Result<UseOutcome, RemoteError> {
-        Err(ServiceError::Unavailable.into())
-    }
-
-    fn add(
-        &mut self,
-        name: SecretName,
-        kind: SecretKind,
-        value: OwnedFd,
-    ) -> Result<(), RemoteError> {
-        self.service
-            .add(
+            .use_secrets(
                 self.caller,
-                &name,
-                kind,
-                || read_value(&value),
+                &[password],
+                &window_target(&window),
                 Instant::now(),
             )
             .map_err(Into::into)
     }
 
-    fn remove(&mut self, name: SecretName) -> Result<bool, RemoteError> {
+    fn run(
+        &mut self,
+        template: TemplateName,
+        _arguments: Vec<String>,
+        _cwd: String,
+    ) -> Result<RunReply, RemoteError> {
+        let now = Instant::now();
+        let Some(names) = self.service.template_secret_names(&template, now) else {
+            return Ok(RunReply::Refused(UseOutcome::Unknown));
+        };
+        match self
+            .service
+            .use_secrets(self.caller, &names, &format!("run:{template}"), now)
+        {
+            Ok(outcome) => Ok(RunReply::Refused(outcome)),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn proxy_session(
+        &mut self,
+        names: Vec<SecretName>,
+        _ttl_minutes: u32,
+    ) -> Result<ProxySessionReply, RemoteError> {
+        match self
+            .service
+            .use_secrets(self.caller, &names, "http-session", Instant::now())
+        {
+            Ok(outcome) => Ok(ProxySessionReply::Refused(outcome)),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn revoke_session(&mut self, _session: u64) -> Result<bool, RemoteError> {
+        Ok(false)
+    }
+
+    fn init(&mut self, master_password: OwnedFd) -> Result<(), RemoteError> {
         self.service
-            .remove(self.caller, &name, Instant::now())
+            .init(self.caller, || read_value(&master_password), Instant::now())
             .map_err(Into::into)
     }
 
-    fn bind(&mut self, name: SecretName, binding: Binding) -> Result<(), RemoteError> {
+    fn unlock(&mut self, master_password: OwnedFd) -> Result<(), RemoteError> {
         self.service
-            .bind(self.caller, &name, binding, Instant::now())
+            .unlock(self.caller, || read_value(&master_password), Instant::now())
             .map_err(Into::into)
     }
 
@@ -168,9 +193,82 @@ impl<Store: ConfigStore> Handler for PeerRequests<'_, Store> {
         self.service.lock(self.caller).map_err(Into::into)
     }
 
-    fn unlock(&mut self, master_password: OwnedFd) -> Result<(), RemoteError> {
+    fn add(
+        &mut self,
+        name: SecretName,
+        kind: SecretKind,
+        master_password: OwnedFd,
+        value: OwnedFd,
+    ) -> Result<(), RemoteError> {
         self.service
-            .unlock(self.caller, || read_value(&master_password), Instant::now())
+            .add(
+                self.caller,
+                &name,
+                kind,
+                || read_value(&master_password),
+                || read_value(&value),
+                Instant::now(),
+            )
+            .map_err(Into::into)
+    }
+
+    fn remove(&mut self, name: SecretName, master_password: OwnedFd) -> Result<bool, RemoteError> {
+        self.service
+            .remove(
+                self.caller,
+                &name,
+                || read_value(&master_password),
+                Instant::now(),
+            )
+            .map_err(Into::into)
+    }
+
+    fn bind(
+        &mut self,
+        name: SecretName,
+        binding: Binding,
+        master_password: OwnedFd,
+    ) -> Result<(), RemoteError> {
+        self.service
+            .bind(
+                self.caller,
+                &name,
+                binding,
+                || read_value(&master_password),
+                Instant::now(),
+            )
+            .map_err(Into::into)
+    }
+
+    fn set_template(
+        &mut self,
+        name: TemplateName,
+        template: Option<RunTemplate>,
+        master_password: OwnedFd,
+    ) -> Result<(), RemoteError> {
+        self.service
+            .set_template(
+                self.caller,
+                &name,
+                template,
+                || read_value(&master_password),
+                Instant::now(),
+            )
+            .map_err(Into::into)
+    }
+
+    fn configure(
+        &mut self,
+        settings: VaultSettings,
+        master_password: OwnedFd,
+    ) -> Result<(), RemoteError> {
+        self.service
+            .configure(
+                self.caller,
+                settings,
+                || read_value(&master_password),
+                Instant::now(),
+            )
             .map_err(Into::into)
     }
 }

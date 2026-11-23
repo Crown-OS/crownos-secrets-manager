@@ -4,8 +4,6 @@ use secrets_protocol::error_code;
 use secrets_protocol::transfer::TransferError;
 use secrets_vault::VaultError;
 
-use crate::config_store::ConfigStoreError;
-
 /// Why a call failed. No variant carries a value.
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
@@ -21,12 +19,14 @@ pub enum ServiceError {
     Invalid(#[from] CoreError),
     #[error("too many calls; try again later")]
     RateLimited,
+    #[error("too many open requests; wait until the user answers them")]
+    TooManyRequests,
     #[error("vault: {0}")]
     Vault(VaultError),
     #[error("value transfer: {0}")]
     Transfer(#[from] TransferError),
-    #[error(transparent)]
-    Config(#[from] ConfigStoreError),
+    #[error("proxy: {0}")]
+    Proxy(String),
 }
 
 impl From<VaultError> for ServiceError {
@@ -46,8 +46,8 @@ impl From<ServiceError> for RemoteError {
             ServiceError::Locked => error_code::LOCKED,
             ServiceError::UnknownSecret(_) => error_code::UNKNOWN_SECRET,
             ServiceError::Invalid(_) | ServiceError::Transfer(_) => error_code::INVALID_ARGUMENT,
-            ServiceError::RateLimited => error_code::RATE_LIMITED,
-            ServiceError::Vault(_) | ServiceError::Config(_) => error_code::VAULT,
+            ServiceError::RateLimited | ServiceError::TooManyRequests => error_code::RATE_LIMITED,
+            ServiceError::Vault(_) | ServiceError::Proxy(_) => error_code::VAULT,
         };
         Self::new(code, error.to_string())
     }

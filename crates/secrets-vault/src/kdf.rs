@@ -28,8 +28,8 @@ impl KdfParams {
     /// Limits for parameters read from a file, so a changed header cannot make the daemon
     /// allocate without bound.
     pub(crate) fn validate_from_file(self) -> Result<Self, VaultError> {
-        let in_range = (8..=1024 * 1024).contains(&self.memory_kib)
-            && (1..=16).contains(&self.iterations)
+        let in_range = (8..=256 * 1024).contains(&self.memory_kib)
+            && (1..=8).contains(&self.iterations)
             && (1..=8).contains(&self.parallelism);
         if in_range {
             Ok(self)

@@ -14,11 +14,10 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use crownos_ipc::{Pending, ServiceBuilder};
-use crownos_secretsd::{MemoryConfigStore, ProcExecutableIdentity, SecretsService};
-use secrets_core::config::SecretEntry;
-use secrets_core::{Binding, SecretKind, SecretName, SecretsConfig, UseOutcome};
+use crownos_secretsd::{ProcExecutableIdentity, SecretsService};
+use secrets_core::{Binding, SecretKind, SecretName, TemplateName, UseOutcome};
 use secrets_protocol::secrets::{self, Client, Event};
-use secrets_protocol::{error_code, transfer};
+use secrets_protocol::{ProxySessionReply, RunReply, error_code, transfer};
 use secrets_vault::{KdfParams, Vault};
 use serde::de::DeserializeOwned;
 
@@ -52,31 +51,16 @@ fn test_executable() -> String {
         .to_owned()
 }
 
-fn config(admin: &str) -> SecretsConfig {
-    let mut config = SecretsConfig {
-        admin_executables: vec![admin.to_owned()],
-        ..SecretsConfig::default()
-    };
-    config.secrets.insert(
-        name("github_token"),
-        SecretEntry {
-            kind: SecretKind::Token,
-            binding: Binding {
-                agents: vec![test_executable()],
-                ..Binding::default()
-            },
-        },
-    );
-    config
+fn password_pipe() -> std::os::fd::OwnedFd {
+    transfer::value_pipe(MASTER_PASSWORD).unwrap()
+}
+
+fn value_pipe() -> std::os::fd::OwnedFd {
+    transfer::value_pipe(PLANTED_VALUE).unwrap()
 }
 
 /// Starts a daemon on its own thread, serving in `socket_directory`.
-fn start_daemon(
-    socket_directory: &Path,
-    vault_path: PathBuf,
-    store: Arc<MemoryConfigStore>,
-    log: CapturedLog,
-) {
+fn start_daemon(socket_directory: &Path, vault_path: PathBuf, admin: String, log: CapturedLog) {
     let mut server = ServiceBuilder::new(secrets::SERVICE)
         .directory(socket_directory)
         .build()
@@ -88,12 +72,12 @@ fn start_daemon(
             .with_writer(move || log.clone())
             .finish();
         let _default = tracing::subscriber::set_default(subscriber);
-        let vault = Vault::new(vault_path, Duration::from_secs(60)).with_kdf_params(KdfParams {
+        let vault = Vault::new(vault_path).with_kdf_params(KdfParams {
             memory_kib: 64,
             iterations: 1,
             parallelism: 1,
         });
-        let service = SecretsService::new(store, vault);
+        let service = SecretsService::new(vault, vec![admin]);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -158,14 +142,25 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+fn bound_to_this_test() -> Binding {
+    Binding {
+        agents: vec![test_executable()],
+        ..Binding::default()
+    }
+}
+
 #[test]
 fn no_reply_event_or_log_line_holds_a_value() {
     let directory = tempfile::tempdir().unwrap();
     let socket_directory = directory.path().join("runtime");
     let vault_path = directory.path().join("data/crownos/secrets.vault");
-    let store = Arc::new(MemoryConfigStore::new(config(&test_executable())));
     let log = CapturedLog::default();
-    start_daemon(&socket_directory, vault_path.clone(), store, log.clone());
+    start_daemon(
+        &socket_directory,
+        vault_path.clone(),
+        test_executable(),
+        log.clone(),
+    );
 
     let mut recorder = Recorder {
         client: Client::connect_in(&socket_directory).unwrap(),
@@ -178,27 +173,56 @@ fn no_reply_event_or_log_line_holds_a_value() {
 
     let status = recorder.call(|client| client.status()).unwrap();
     assert!(!status.vault_exists && status.locked);
+    let missing = recorder
+        .call(|client| client.unlock(password_pipe()))
+        .unwrap_err();
+    assert_eq!(missing.code, error_code::VAULT);
 
-    let locked_use = recorder.call(|client| client.type_into(name("github_token"), "w1".into()));
+    let locked_use =
+        recorder.call(|client| client.type_into(name("github_token"), "w1\n\u{1b}[31m".into()));
     assert_eq!(locked_use.unwrap(), UseOutcome::Locked);
 
-    let pipe = transfer::value_pipe(MASTER_PASSWORD).unwrap();
-    recorder.call(|client| client.unlock(pipe)).unwrap();
-    let pipe = transfer::value_pipe(PLANTED_VALUE).unwrap();
     recorder
-        .call(|client| client.add(name("github_token"), SecretKind::Token, pipe))
+        .call(|client| client.init(password_pipe()))
         .unwrap();
-    let pipe = transfer::value_pipe(PLANTED_VALUE).unwrap();
     recorder
-        .call(|client| client.add(name("unbound"), SecretKind::ApiKey, pipe))
+        .call(|client| {
+            client.add(
+                name("github_token"),
+                SecretKind::Token,
+                password_pipe(),
+                value_pipe(),
+            )
+        })
         .unwrap();
+    recorder
+        .call(|client| client.bind(name("github_token"), bound_to_this_test(), password_pipe()))
+        .unwrap();
+    recorder
+        .call(|client| {
+            client.add(
+                name("unbound"),
+                SecretKind::ApiKey,
+                password_pipe(),
+                value_pipe(),
+            )
+        })
+        .unwrap();
+    let wrong_password = transfer::value_pipe(b"wrong-password").unwrap();
+    let refused = recorder
+        .call(|client| client.bind(name("unbound"), bound_to_this_test(), wrong_password))
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::VAULT);
 
-    let pipe = transfer::value_pipe(b"wrong-password").unwrap();
     recorder.call(|client| client.lock()).unwrap();
-    let wrong = recorder.call(|client| client.unlock(pipe)).unwrap_err();
+    let wrong_password = transfer::value_pipe(b"wrong-password").unwrap();
+    let wrong = recorder
+        .call(|client| client.unlock(wrong_password))
+        .unwrap_err();
     assert_eq!(wrong.code, error_code::VAULT);
-    let pipe = transfer::value_pipe(MASTER_PASSWORD).unwrap();
-    recorder.call(|client| client.unlock(pipe)).unwrap();
+    recorder
+        .call(|client| client.unlock(password_pipe()))
+        .unwrap();
 
     let listed = recorder.call(|client| client.list()).unwrap();
     let names: Vec<&str> = listed.iter().map(|meta| meta.name.as_str()).collect();
@@ -211,18 +235,25 @@ fn no_reply_event_or_log_line_holds_a_value() {
     let denied =
         recorder.call(|client| client.fill_login("user".into(), name("unbound"), "w1".into()));
     assert_eq!(denied.unwrap(), UseOutcome::Denied);
-    let unknown = recorder.call(|client| client.proxy_session(vec![name("missing")]));
-    assert_eq!(unknown.unwrap(), UseOutcome::Unknown);
+    let unknown = recorder.call(|client| client.proxy_session(vec![name("missing")], 5));
+    assert_eq!(
+        unknown.unwrap(),
+        ProxySessionReply::Refused(UseOutcome::Unknown)
+    );
+    let template = TemplateName::parse("missing").unwrap();
+    let no_template = recorder.call(|client| client.run(template, Vec::new(), String::new()));
+    assert_eq!(no_template.unwrap(), RunReply::Refused(UseOutcome::Unknown));
     let request = recorder.call(|client| {
         client.request(
             name("openai_api_key"),
             SecretKind::ApiKey,
-            "call the OpenAI API".into(),
+            "call the OpenAI API\n\u{1b}[2Jforged line".into(),
         )
     });
     assert!(request.is_ok());
     let status = recorder.call(|client| client.status()).unwrap();
     assert_eq!(status.pending_requests.len(), 1);
+    assert!(!status.pending_requests[0].purpose.contains('\u{1b}'));
     assert!(!status.locked);
 
     let events = recorder.drain_events();
@@ -231,11 +262,13 @@ fn no_reply_event_or_log_line_holds_a_value() {
         outcomes,
         [UseOutcome::Locked, UseOutcome::Denied, UseOutcome::Unknown]
     );
+    assert!(events.iter().all(|event| !event.target.contains('\n')));
 
     let log = log.0.lock().unwrap().clone();
     let log_text = String::from_utf8_lossy(&log);
     assert!(log_text.contains("crownos::audit::secrets"), "{log_text}");
     assert!(log_text.contains("github_token"), "{log_text}");
+    assert!(!log_text.contains('\u{1b}'), "{log_text}");
     let vault_file = std::fs::read(&vault_path).unwrap();
     for form in revealing_forms() {
         let shown = String::from_utf8_lossy(&form);
@@ -249,27 +282,31 @@ fn no_reply_event_or_log_line_holds_a_value() {
 }
 
 #[test]
-fn bindings_survive_a_restart_and_only_admins_change_them() {
+fn rules_survive_a_restart_and_only_admins_change_them() {
     let directory = tempfile::tempdir().unwrap();
     let vault_path = directory.path().join("secrets.vault");
-    let store = Arc::new(MemoryConfigStore::new(config(&test_executable())));
 
     let first_socket = directory.path().join("first");
     start_daemon(
         &first_socket,
         vault_path.clone(),
-        store.clone(),
+        test_executable(),
         CapturedLog::default(),
     );
     let mut first = Recorder {
         client: Client::connect_in(&first_socket).unwrap(),
         seen: String::new(),
     };
-    let pipe = transfer::value_pipe(MASTER_PASSWORD).unwrap();
-    first.call(|client| client.unlock(pipe)).unwrap();
-    let pipe = transfer::value_pipe(PLANTED_VALUE).unwrap();
+    first.call(|client| client.init(password_pipe())).unwrap();
     first
-        .call(|client| client.add(name("mail"), SecretKind::Password, pipe))
+        .call(|client| {
+            client.add(
+                name("mail"),
+                SecretKind::Password,
+                password_pipe(),
+                value_pipe(),
+            )
+        })
         .unwrap();
     let binding = Binding {
         agents: vec!["/usr/bin/crownos-secrets-mcp".into()],
@@ -277,22 +314,22 @@ fn bindings_survive_a_restart_and_only_admins_change_them() {
         ..Binding::default()
     };
     first
-        .call(|client| client.bind(name("mail"), binding.clone()))
+        .call(|client| client.bind(name("mail"), binding.clone(), password_pipe()))
         .unwrap();
     let invalid = Binding {
         agents: vec![String::new()],
         ..Binding::default()
     };
     let refused = first
-        .call(|client| client.bind(name("mail"), invalid))
+        .call(|client| client.bind(name("mail"), invalid, password_pipe()))
         .unwrap_err();
     assert_eq!(refused.code, error_code::INVALID_ARGUMENT);
 
     let second_socket = directory.path().join("second");
     start_daemon(
         &second_socket,
-        vault_path,
-        store.clone(),
+        vault_path.clone(),
+        test_executable(),
         CapturedLog::default(),
     );
     let mut second = Recorder {
@@ -301,6 +338,11 @@ fn bindings_survive_a_restart_and_only_admins_change_them() {
     };
     let status = second.call(|client| client.status()).unwrap();
     assert!(status.vault_exists && status.locked);
+    let locked = second.call(|client| client.list()).unwrap_err();
+    assert_eq!(locked.code, error_code::LOCKED);
+    second
+        .call(|client| client.unlock(password_pipe()))
+        .unwrap();
     let listed = second.call(|client| client.list()).unwrap();
     let mail = listed
         .iter()
@@ -308,33 +350,34 @@ fn bindings_survive_a_restart_and_only_admins_change_them() {
         .unwrap();
     assert_eq!(mail.kind, SecretKind::Password);
     assert_eq!(mail.binding, binding);
-    let pipe = transfer::value_pipe(MASTER_PASSWORD).unwrap();
-    second.call(|client| client.unlock(pipe)).unwrap();
-    assert!(second.call(|client| client.remove(name("mail"))).unwrap());
+    assert!(
+        second
+            .call(|client| client.remove(name("mail"), password_pipe()))
+            .unwrap()
+    );
 
-    let mut not_admin = store.load_for_test();
-    not_admin.admin_executables = vec!["/usr/bin/crownos-secrets".into()];
-    store.replace_for_test(not_admin);
-    let pipe = transfer::value_pipe(PLANTED_VALUE).unwrap();
-    let refused = second
-        .call(|client| client.add(name("mail"), SecretKind::Password, pipe))
+    let third_socket = directory.path().join("third");
+    start_daemon(
+        &third_socket,
+        vault_path,
+        "/usr/bin/crownos-secrets".into(),
+        CapturedLog::default(),
+    );
+    let mut third = Recorder {
+        client: Client::connect_in(&third_socket).unwrap(),
+        seen: String::new(),
+    };
+    let refused = third
+        .call(|client| {
+            client.add(
+                name("mail"),
+                SecretKind::Password,
+                password_pipe(),
+                value_pipe(),
+            )
+        })
         .unwrap_err();
     assert_eq!(refused.code, error_code::UNAUTHORIZED);
-    let refused = second.call(|client| client.lock()).unwrap_err();
+    let refused = third.call(|client| client.lock()).unwrap_err();
     assert_eq!(refused.code, error_code::UNAUTHORIZED);
-}
-
-trait StoreForTest {
-    fn load_for_test(&self) -> SecretsConfig;
-    fn replace_for_test(&self, config: SecretsConfig);
-}
-
-impl StoreForTest for MemoryConfigStore {
-    fn load_for_test(&self) -> SecretsConfig {
-        crownos_secretsd::ConfigStore::load(self).unwrap()
-    }
-
-    fn replace_for_test(&self, config: SecretsConfig) {
-        crownos_secretsd::ConfigStore::save(self, &config).unwrap();
-    }
 }

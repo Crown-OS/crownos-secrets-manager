@@ -28,6 +28,12 @@ pub(crate) struct BindingArguments {
     /// The header value, with `{value}` for the secret, for example `Bearer {value}`.
     #[arg(long)]
     http_format: Option<String>,
+    /// An upper-case method the HTTP binding allows; none allows every method.
+    #[arg(long = "http-method")]
+    http_methods: Vec<String>,
+    /// A path pattern the HTTP binding allows, for example `/repos/*`; none allows every path.
+    #[arg(long = "http-path")]
+    http_paths: Vec<String>,
 }
 
 impl BindingArguments {
@@ -43,6 +49,8 @@ impl BindingArguments {
                 host,
                 header,
                 format,
+                methods: self.http_methods,
+                paths: self.http_paths,
             }],
             (None, None, None) => Vec::new(),
             _ => bail!("--http-host, --http-header and --http-format go together"),
@@ -59,7 +67,7 @@ impl BindingArguments {
     }
 }
 
-fn parse_confirm(text: &str) -> Result<Confirm, String> {
+pub(crate) fn parse_confirm(text: &str) -> Result<Confirm, String> {
     match text {
         "every-use" => Ok(Confirm::EveryUse),
         "never" => Ok(Confirm::Never),

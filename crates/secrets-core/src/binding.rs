@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::CoreError;
-use crate::util::wildcard::wildcard_matches;
+use crate::wildcard_matches;
 
 /// Where a secret may go. Patterns use `*` for any run of characters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,14 +26,41 @@ pub enum Confirm {
 /// How the HTTPS proxy puts an API key into a request to `host`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpBinding {
+    /// A host pattern, for example `api.github.com` or `*.example.com`. With `:port`, only that
+    /// port matches; without, any port.
     pub host: String,
     pub header: String,
     /// The header value, with `{value}` where the secret goes, for example `Bearer {value}`.
     pub format: String,
+    /// Upper-case methods; empty allows every method.
+    pub methods: Vec<String>,
+    /// Path patterns, for example `/repos/*`; empty allows every path.
+    pub paths: Vec<String>,
 }
 
 impl HttpBinding {
     pub const VALUE_PLACEHOLDER: &str = "{value}";
+
+    /// Whether a CONNECT to `authority` (`host:port`) may reach this binding.
+    pub fn matches_authority(&self, authority: &str) -> bool {
+        if self.host.contains(':') {
+            return wildcard_matches(&self.host, authority);
+        }
+        let host = authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _port)| host);
+        wildcard_matches(&self.host, host)
+    }
+
+    pub fn matches_request(&self, authority: &str, method: &str, path: &str) -> bool {
+        self.matches_authority(authority)
+            && (self.methods.is_empty() || self.methods.iter().any(|allowed| allowed == method))
+            && (self.paths.is_empty()
+                || self
+                    .paths
+                    .iter()
+                    .any(|pattern| wildcard_matches(pattern, path)))
+    }
 
     fn validate(&self) -> Result<(), CoreError> {
         let header_is_token = !self.header.is_empty()
@@ -131,12 +158,35 @@ mod tests {
     }
 
     #[test]
+    fn http_bindings_match_host_port_method_and_path() {
+        let binding = HttpBinding {
+            host: "*.github.com".into(),
+            header: "Authorization".into(),
+            format: "Bearer {value}".into(),
+            methods: vec!["GET".into()],
+            paths: vec!["/repos/*".into()],
+        };
+        assert!(binding.matches_request("api.github.com:443", "GET", "/repos/a/b"));
+        assert!(!binding.matches_request("api.github.com:443", "POST", "/repos/a/b"));
+        assert!(!binding.matches_request("api.github.com:443", "GET", "/user"));
+        assert!(!binding.matches_request("github.com.evil.example:443", "GET", "/repos/a"));
+        let with_port = HttpBinding {
+            host: "localhost:8443".into(),
+            ..binding
+        };
+        assert!(with_port.matches_authority("localhost:8443"));
+        assert!(!with_port.matches_authority("localhost:9443"));
+    }
+
+    #[test]
     fn validation_refuses_incomplete_http_bindings() {
         let mut binding = Binding::default();
         binding.http.push(HttpBinding {
             host: "api.example.com".into(),
             header: "Authorization".into(),
             format: "Bearer".into(),
+            methods: Vec::new(),
+            paths: Vec::new(),
         });
         assert_eq!(binding.validate(), Err(CoreError::InvalidHttpBinding));
         if let Some(http) = binding.http.first_mut() {

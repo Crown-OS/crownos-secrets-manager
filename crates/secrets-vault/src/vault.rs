@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::{KdfParams, OpenVault, VaultError};
@@ -8,12 +8,11 @@ struct Unlocked {
     lock_at: Instant,
 }
 
-/// The vault file with its lock state. An unlock lasts `lock_after`; then the decrypted values
-/// and the key are dropped and zeroed.
+/// The vault file with its lock state. An unlock lasts `lock_after_minutes` from the sealed
+/// settings; then the decrypted values, rules and key are dropped and zeroed.
 pub struct Vault {
     path: PathBuf,
     kdf: KdfParams,
-    lock_after: Duration,
     unlocked: Option<Unlocked>,
 }
 
@@ -28,50 +27,76 @@ impl std::fmt::Debug for Vault {
 }
 
 impl Vault {
-    pub fn new(path: PathBuf, lock_after: Duration) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         Self {
             path,
             kdf: KdfParams::default(),
-            lock_after,
             unlocked: None,
         }
     }
 
-    /// The parameters for a vault that [`Self::unlock`] creates.
+    /// The parameters for a vault that [`Self::init`] creates.
     #[must_use]
     pub const fn with_kdf_params(mut self, kdf: KdfParams) -> Self {
         self.kdf = kdf;
         self
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn exists(&self) -> bool {
-        self.path.exists()
+        self.path.symlink_metadata().is_ok()
     }
 
-    pub const fn set_lock_after(&mut self, lock_after: Duration) {
-        self.lock_after = lock_after;
-    }
-
-    /// Opens the vault, or creates an empty one when no file exists yet.
+    /// Creates an empty vault and leaves it unlocked.
     ///
     /// # Errors
     ///
-    /// Fails on a wrong password or any [`OpenVault::open`] error.
+    /// Fails when a vault exists, or on a write error.
+    pub fn init(&mut self, password: &[u8], now: Instant) -> Result<(), VaultError> {
+        let contents = OpenVault::create(&self.path, password, self.kdf)?;
+        self.keep_unlocked(contents, now);
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Fails when no vault exists, on a wrong password, or on any [`OpenVault::open`] error.
     pub fn unlock(&mut self, password: &[u8], now: Instant) -> Result<(), VaultError> {
-        let contents = if self.exists() {
-            OpenVault::open(&self.path, password)?
-        } else {
-            OpenVault::create(&self.path, password, self.kdf)?
-        };
+        if !self.exists() {
+            return Err(VaultError::Missing);
+        }
+        let contents = OpenVault::open(&self.path, password)?;
+        self.keep_unlocked(contents, now);
+        Ok(())
+    }
+
+    /// The open vault, after a check of the master password: it unlocks a locked vault, and
+    /// compares the password with the key of an unlocked one.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a wrong password, or as [`Self::unlock`].
+    pub fn authorize(
+        &mut self,
+        password: &[u8],
+        now: Instant,
+    ) -> Result<&mut OpenVault, VaultError> {
+        self.lock_if_expired(now);
+        match self.unlocked.as_ref() {
+            Some(unlocked) if !unlocked.contents.password_matches(password)? => {
+                return Err(VaultError::WrongPassword);
+            }
+            Some(_) => {}
+            None => self.unlock(password, now)?,
+        }
+        self.contents_mut(now)
+    }
+
+    fn keep_unlocked(&mut self, contents: OpenVault, now: Instant) {
+        let minutes = contents.rules().settings.lock_after_minutes;
         self.unlocked = Some(Unlocked {
             contents,
-            lock_at: now + self.lock_after,
+            lock_at: now + Duration::from_secs(u64::from(minutes) * 60),
         });
-        Ok(())
     }
 
     pub fn lock(&mut self) {

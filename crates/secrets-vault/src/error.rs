@@ -11,6 +11,10 @@ pub enum VaultError {
     UnsafePermissions(PathBuf),
     #[error("{0} belongs to another user")]
     WrongOwner(PathBuf),
+    #[error("{0} is not a regular file")]
+    NotARegularFile(PathBuf),
+    #[error("{0} is larger than a vault can be")]
+    FileTooLarge(PathBuf),
     #[error("the file is not a CrownOS secrets vault")]
     NotAVault,
     #[error("the vault has format version {0}; this program reads version 1")]
@@ -19,10 +23,14 @@ pub enum VaultError {
     KdfParametersOutOfRange,
     #[error("wrong master password, or the vault file was changed")]
     WrongPasswordOrTampered,
+    #[error("wrong master password")]
+    WrongPassword,
     #[error("the vault body is damaged")]
     DamagedBody,
     #[error("the vault is locked")]
     Locked,
+    #[error("no vault exists yet; run `crownos-secrets init`")]
+    Missing,
     #[error("a vault already exists at {0}")]
     AlreadyExists(PathBuf),
     #[error("a value is larger than {max} bytes", max = crate::MAX_VALUE_BYTES)]

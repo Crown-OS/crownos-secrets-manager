@@ -19,6 +19,7 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 crownos-ipc = { workspace = true }
 rpassword = { workspace = true }
+rustix = { workspace = true }
 serde = { workspace = true }
 zeroize = { workspace = true }
 

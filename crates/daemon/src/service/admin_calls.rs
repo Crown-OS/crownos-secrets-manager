@@ -1,132 +1,58 @@
-//! Calls that only the admin executables may make. They change the vault or the rules; none of
-//! them returns a value.
+//! Calls that only the admin executables may make. Each one that changes the vault needs the
+//! master password; none of them returns a value.
 
 use std::time::Instant;
 
 use secrecy::{ExposeSecret as _, SecretSlice};
-use secrets_core::config::SecretEntry;
-use secrets_core::{Binding, SecretKind, SecretName};
+use secrets_core::{
+    Binding, RunTemplate, SecretEntry, SecretKind, SecretName, TemplateName, VaultSettings,
+};
 use secrets_protocol::transfer::TransferError;
+use secrets_vault::OpenVault;
 
 use super::{SecretsService, ServiceError};
-use crate::{Caller, ConfigStore, audit};
+use crate::{Caller, audit};
 
-impl<Store: ConfigStore> SecretsService<Store> {
-    /// Stores a value and names the secret in `secrets.ron`. A new secret gets an empty binding.
-    /// `read_value` runs only after the admin check.
+/// Reads a value or the master password from its pipe. It runs only after the admin check.
+pub trait ReadSecret: FnOnce() -> Result<SecretSlice<u8>, TransferError> {}
+
+impl<Read: FnOnce() -> Result<SecretSlice<u8>, TransferError>> ReadSecret for Read {}
+
+impl SecretsService {
+    /// Creates the vault.
     ///
     /// # Errors
     ///
-    /// Fails for a caller that is not an admin, a locked vault, or a read or write error.
-    pub fn add(
+    /// Fails for a caller that is not an admin, when a vault exists, or on a write error.
+    pub fn init(
         &mut self,
         caller: &Caller,
-        name: &SecretName,
-        kind: SecretKind,
-        read_value: impl FnOnce() -> Result<SecretSlice<u8>, TransferError>,
+        read_password: impl ReadSecret,
         now: Instant,
     ) -> Result<(), ServiceError> {
-        let result = self.add_checked(caller, name, kind, read_value, now);
-        audit::admin_call(caller, "add", Some(name), result_name(&result));
+        let result = self.require_admin(caller).and_then(|()| {
+            let password = read_password()?;
+            Ok(self.vault.init(password.expose_secret(), now)?)
+        });
+        audit::admin_call(caller, "init", None, result_name(&result));
         result
-    }
-
-    fn add_checked(
-        &mut self,
-        caller: &Caller,
-        name: &SecretName,
-        kind: SecretKind,
-        read_value: impl FnOnce() -> Result<SecretSlice<u8>, TransferError>,
-        now: Instant,
-    ) -> Result<(), ServiceError> {
-        self.require_admin(caller)?;
-        let contents = self.vault.contents_mut(now)?;
-        let value = read_value()?;
-        if value.expose_secret().is_empty() {
-            return Err(TransferError::Empty.into());
-        }
-        contents.insert(name.clone(), value)?;
-        let entry = self
-            .config
-            .secrets
-            .entry(name.clone())
-            .or_insert_with(|| SecretEntry {
-                kind,
-                binding: Binding::default(),
-            });
-        entry.kind = kind;
-        self.store.save(&self.config)?;
-        self.pending_requests
-            .retain(|request| request.name != *name);
-        Ok(())
     }
 
     /// # Errors
     ///
-    /// Fails for a caller that is not an admin, a locked vault, or a write error.
-    pub fn remove(
+    /// Fails for a caller that is not an admin, a missing vault or a wrong password.
+    pub fn unlock(
         &mut self,
         caller: &Caller,
-        name: &SecretName,
-        now: Instant,
-    ) -> Result<bool, ServiceError> {
-        let result = self.remove_checked(caller, name, now);
-        audit::admin_call(caller, "remove", Some(name), result_name(&result));
-        result
-    }
-
-    fn remove_checked(
-        &mut self,
-        caller: &Caller,
-        name: &SecretName,
-        now: Instant,
-    ) -> Result<bool, ServiceError> {
-        self.require_admin(caller)?;
-        let in_vault = self.vault.contents_mut(now)?.remove(name)?;
-        let in_config = self.config.secrets.remove(name).is_some();
-        if in_config {
-            self.store.save(&self.config)?;
-        }
-        self.last_used.remove(name);
-        Ok(in_vault || in_config)
-    }
-
-    /// Replaces the rules of a secret.
-    ///
-    /// # Errors
-    ///
-    /// Fails for a caller that is not an admin, a locked vault, an unknown secret, an invalid
-    /// binding, or a write error.
-    pub fn bind(
-        &mut self,
-        caller: &Caller,
-        name: &SecretName,
-        binding: Binding,
+        read_password: impl ReadSecret,
         now: Instant,
     ) -> Result<(), ServiceError> {
-        let result = self.bind_checked(caller, name, binding, now);
-        audit::admin_call(caller, "bind", Some(name), result_name(&result));
+        let result = self.require_admin(caller).and_then(|()| {
+            let password = read_password()?;
+            Ok(self.vault.unlock(password.expose_secret(), now)?)
+        });
+        audit::admin_call(caller, "unlock", None, result_name(&result));
         result
-    }
-
-    fn bind_checked(
-        &mut self,
-        caller: &Caller,
-        name: &SecretName,
-        binding: Binding,
-        now: Instant,
-    ) -> Result<(), ServiceError> {
-        self.require_admin(caller)?;
-        self.vault.contents(now)?;
-        binding.validate()?;
-        let entry = self
-            .config
-            .secrets
-            .get_mut(name)
-            .ok_or_else(|| ServiceError::UnknownSecret(name.clone()))?;
-        entry.binding = binding;
-        self.store.save(&self.config)?;
-        Ok(())
     }
 
     /// # Errors
@@ -138,38 +64,148 @@ impl<Store: ConfigStore> SecretsService<Store> {
         result
     }
 
-    /// Unlocks the vault, or creates it with this password when no vault exists.
-    /// `read_password` runs only after the admin check.
+    /// Stores a value. A new secret gets an empty binding; a replaced one keeps its binding.
     ///
     /// # Errors
     ///
-    /// Fails for a caller that is not an admin, a read error or a wrong password.
-    pub fn unlock(
+    /// Fails for a caller that is not an admin, a wrong password, or a read or write error.
+    pub fn add(
         &mut self,
         caller: &Caller,
-        read_password: impl FnOnce() -> Result<SecretSlice<u8>, TransferError>,
+        name: &SecretName,
+        kind: SecretKind,
+        read_password: impl ReadSecret,
+        read_value: impl ReadSecret,
         now: Instant,
     ) -> Result<(), ServiceError> {
-        let result = self.unlock_checked(caller, read_password, now);
-        audit::admin_call(caller, "unlock", None, result_name(&result));
-        result
-    }
-
-    fn unlock_checked(
-        &mut self,
-        caller: &Caller,
-        read_password: impl FnOnce() -> Result<SecretSlice<u8>, TransferError>,
-        now: Instant,
-    ) -> Result<(), ServiceError> {
-        self.require_admin(caller)?;
-        let password = read_password()?;
-        self.vault.unlock(password.expose_secret(), now)?;
+        self.change_vault(caller, "add", Some(name), read_password, now, |vault| {
+            let value = read_value()?;
+            let binding = vault
+                .rules()
+                .secrets
+                .get(name)
+                .map(|entry| entry.binding.clone())
+                .unwrap_or_default();
+            Ok(vault.insert_secret(name.clone(), SecretEntry { kind, binding }, value)?)
+        })?;
+        self.pending_requests
+            .retain(|request| request.name != *name);
         Ok(())
     }
 
-    fn require_admin(&mut self, caller: &Caller) -> Result<(), ServiceError> {
-        self.reload_config();
-        if caller.is_any_of(&self.config.admin_executables) {
+    /// # Errors
+    ///
+    /// Fails for a caller that is not an admin, a wrong password, or a write error.
+    pub fn remove(
+        &mut self,
+        caller: &Caller,
+        name: &SecretName,
+        read_password: impl ReadSecret,
+        now: Instant,
+    ) -> Result<bool, ServiceError> {
+        let removed =
+            self.change_vault(caller, "remove", Some(name), read_password, now, |vault| {
+                Ok(vault.remove_secret(name)?)
+            })?;
+        self.last_used.remove(name);
+        Ok(removed)
+    }
+
+    /// Replaces the rules of a secret.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a caller that is not an admin, a wrong password, an unknown secret, an invalid
+    /// binding, or a write error.
+    pub fn bind(
+        &mut self,
+        caller: &Caller,
+        name: &SecretName,
+        binding: Binding,
+        read_password: impl ReadSecret,
+        now: Instant,
+    ) -> Result<(), ServiceError> {
+        self.change_vault(caller, "bind", Some(name), read_password, now, |vault| {
+            binding.validate()?;
+            if !vault.rules().secrets.contains_key(name) {
+                return Err(ServiceError::UnknownSecret(name.clone()));
+            }
+            Ok(vault.change_rules(|rules| {
+                if let Some(entry) = rules.secrets.get_mut(name) {
+                    entry.binding = binding;
+                }
+            })?)
+        })
+    }
+
+    /// Adds, replaces or, with `None`, removes a run template.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a caller that is not an admin, a wrong password, an invalid template, or a
+    /// write error.
+    pub fn set_template(
+        &mut self,
+        caller: &Caller,
+        name: &TemplateName,
+        template: Option<RunTemplate>,
+        read_password: impl ReadSecret,
+        now: Instant,
+    ) -> Result<(), ServiceError> {
+        self.change_vault(caller, "set-template", None, read_password, now, |vault| {
+            if let Some(template) = &template {
+                template.validate()?;
+            }
+            Ok(vault.change_rules(|rules| match template {
+                Some(template) => {
+                    rules.run_templates.insert(name.clone(), template);
+                }
+                None => {
+                    rules.run_templates.remove(name);
+                }
+            })?)
+        })
+    }
+
+    /// Replaces the lock time, the default confirmation and the rate limits. A new lock time
+    /// counts from the next unlock.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a caller that is not an admin, a wrong password, or a write error.
+    pub fn configure(
+        &mut self,
+        caller: &Caller,
+        settings: VaultSettings,
+        read_password: impl ReadSecret,
+        now: Instant,
+    ) -> Result<(), ServiceError> {
+        self.change_vault(caller, "configure", None, read_password, now, |vault| {
+            Ok(vault.change_rules(|rules| rules.settings = settings)?)
+        })
+    }
+
+    /// The admin check, then the master password check, then `change`; one audit line.
+    pub(crate) fn change_vault<Changed>(
+        &mut self,
+        caller: &Caller,
+        call: &str,
+        name: Option<&SecretName>,
+        read_password: impl ReadSecret,
+        now: Instant,
+        change: impl FnOnce(&mut OpenVault) -> Result<Changed, ServiceError>,
+    ) -> Result<Changed, ServiceError> {
+        let result = self.require_admin(caller).and_then(|()| {
+            let password = read_password()?;
+            let vault = self.vault.authorize(password.expose_secret(), now)?;
+            change(vault)
+        });
+        audit::admin_call(caller, call, name, result_name(&result));
+        result
+    }
+
+    fn require_admin(&self, caller: &Caller) -> Result<(), ServiceError> {
+        if self.is_admin(caller) {
             Ok(())
         } else {
             Err(ServiceError::NotAdmin)

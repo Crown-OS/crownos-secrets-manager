@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 use crownos_ipc::ServiceBuilder;
-use crownos_secretsd::{CrownosConfigStore, ProcExecutableIdentity, SecretsService, hardening};
+use crownos_secretsd::{ProcExecutableIdentity, SecretsService, admin, hardening};
 use secrets_protocol::secrets;
 use secrets_vault::Vault;
 use tracing_subscriber::EnvFilter;
@@ -12,13 +12,11 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
     hardening::forbid_core_dumps_and_tracing().context("making the process non-dumpable")?;
-    let vault_path = dirs::data_dir()
+    let data_directory = dirs::data_dir()
         .context("finding the data directory")?
-        .join("crownos/secrets.vault");
-    let service = SecretsService::new(
-        CrownosConfigStore,
-        Vault::new(vault_path, Default::default()),
-    );
+        .join("crownos");
+    let vault = Vault::new(data_directory.join("secrets.vault"));
+    let service = SecretsService::new(vault, admin::admin_executables());
     let mut server = ServiceBuilder::new(secrets::SERVICE)
         .build()
         .context("binding the secrets socket")?;

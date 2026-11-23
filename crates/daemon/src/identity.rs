@@ -45,8 +45,10 @@ pub trait IdentifyCaller {
     fn identify(&self, credentials: &Credentials) -> Caller;
 }
 
-/// The caller is the target of `/proc/<pid>/exe`, read while the pidfd shows the same process
-/// still runs, so a reused pid cannot lend its executable to another process.
+/// The caller is the target of `/proc/<pid>/exe`, read while the pidfd shows that the process
+/// that connected still runs. This names the program the peer runs now. It does not stop a
+/// process that connects and then runs `exec`, or that hands its socket to another process. So
+/// the name is a second layer: admin calls that change the vault also need the master password.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcExecutableIdentity;
 

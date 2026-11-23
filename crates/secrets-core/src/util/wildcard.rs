@@ -1,5 +1,5 @@
 /// Matches `text` against `pattern`, where `*` stands for any run of characters, including none.
-pub(crate) fn wildcard_matches(pattern: &str, text: &str) -> bool {
+pub fn wildcard_matches(pattern: &str, text: &str) -> bool {
     let mut parts = pattern.split('*');
     let Some(first) = parts.next() else {
         return text.is_empty();
