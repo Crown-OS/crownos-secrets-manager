@@ -2,7 +2,7 @@
 #
 # Builds the checkout this file lives in, so run makepkg from packaging/ with
 # the sibling path dependencies checked out next to the repository:
-# ../crownos-config and ../crownos-ipc.
+# ../crownos-ipc.
 
 pkgname=crownos-secrets-manager
 pkgver=0.1.0
