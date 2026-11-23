@@ -118,8 +118,8 @@ crownos_ipc::protocol! {
         /// Types the secret into the focused field of the target window, through the compositor.
         /// `UNAVAILABLE` when the compositor does not offer `crownos_secret_input_manager_v1`.
         fn type_into(name: SecretName, target: TypingTarget) -> UseOutcome;
-        /// Types the user name secret, a Tab, then the password secret into a password field;
-        /// one confirmation covers both.
+        /// Types the user name secret, a Tab, then the password secret into a password field, as
+        /// one compositor request; the compositor's confirmation covers both.
         fn fill_login(username: SecretName, password: SecretName, target: TypingTarget) -> UseOutcome;
         /// Runs a registered template in a sandbox with secrets in its environment.
         fn run(template: TemplateName, arguments: Vec<String>, cwd: String) -> RunReply;
