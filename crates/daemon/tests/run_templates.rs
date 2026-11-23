@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use crownos_secretsd::{Caller, SecretsService};
 use secrecy::SecretSlice;
-use secrets_core::{Binding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome};
+use secrets_core::{
+    Binding, Confirm, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome,
+};
 use secrets_protocol::RunReply;
 use secrets_protocol::transfer::TransferError;
 use secrets_vault::{KdfParams, Vault};
@@ -60,6 +62,7 @@ fn service(directory: &Path, bwrap: PathBuf, cwd_glob: &str) -> SecretsService {
         .unwrap();
     let binding = Binding {
         agents: vec![AGENT.into()],
+        confirm: Some(Confirm::Never),
         ..Binding::default()
     };
     service
@@ -176,4 +179,28 @@ async fn refusals_come_before_the_sandbox() {
         .run(&agent(), &template_name("show"), &[], "", now)
         .unwrap();
     assert_eq!(locked, RunReply::Refused(UseOutcome::Locked));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_default_binding_needs_a_confirmation_for_a_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut service = service(directory.path(), "/nonexistent/bwrap".into(), "");
+    let now = Instant::now();
+    let default_confirm = Binding {
+        agents: vec![AGENT.into()],
+        ..Binding::default()
+    };
+    service
+        .bind(
+            &admin(),
+            &SecretName::parse("token").unwrap(),
+            default_confirm,
+            bytes(PASSWORD),
+            now,
+        )
+        .unwrap();
+    let refused = service
+        .run(&agent(), &template_name("show"), &[], "", now)
+        .unwrap();
+    assert_eq!(refused, RunReply::Refused(UseOutcome::NeedsConfirmation));
 }

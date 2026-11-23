@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crownos_secretsd::{Caller, SecretsService, ServiceError};
 use secrecy::SecretSlice;
 use secrets_core::{
-    Binding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome, VaultSettings,
+    Binding, Confirm, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome, VaultSettings,
 };
 use secrets_protocol::transfer::TransferError;
 use secrets_vault::{KdfParams, Vault};
@@ -62,6 +62,7 @@ fn service(vault_path: &Path, now: Instant, settings: VaultSettings) -> SecretsS
         .unwrap();
     let binding = Binding {
         agents: vec![AGENT.into()],
+        confirm: Some(Confirm::Never),
         ..Binding::default()
     };
     service

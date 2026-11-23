@@ -104,9 +104,11 @@ The default binding allows nothing. An agent can use a secret only when `agents`
 
 Not all rules apply yet:
 
-- `confirm`, `targets` and `require_password_field` apply from S4 (typing through the
-  compositor). `run` and `proxy_session` use a secret without a confirmation on screen, also when
-  `confirm` is `EveryUse`.
+- The confirmation on screen arrives in S4. Until then the daemon refuses every use with
+  `NeedsConfirmation` unless the confirmation of the secret is `Never`: `confirm: Some(Never)` in
+  the binding (`crownos-secrets bind <name> --confirm never`), or no `confirm` and a
+  `default_confirm` of `Never`. The default is `EveryUse`, so a new binding allows nothing yet.
+- `targets` and `require_password_field` apply from S4 (typing through the compositor).
 - `uses_per_minute` counts calls (`run`, `proxy_session` and the others), not the requests that
   go through one proxy session.
 

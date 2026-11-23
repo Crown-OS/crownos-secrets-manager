@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use crownos_secretsd::{Caller, SecretsService};
 use secrecy::SecretSlice;
-use secrets_core::{Binding, HttpBinding, SecretKind, SecretName, UseOutcome};
+use secrets_core::{Binding, Confirm, HttpBinding, SecretKind, SecretName, UseOutcome};
 use secrets_protocol::ProxySessionReply;
 use secrets_protocol::transfer::TransferError;
 use secrets_vault::{KdfParams, Vault};
@@ -49,6 +49,7 @@ fn add(service: &mut SecretsService, secret: &str, http: Vec<HttpBinding>, now: 
         .unwrap();
     let binding = Binding {
         agents: vec![AGENT.into()],
+        confirm: Some(Confirm::Never),
         http,
         ..Binding::default()
     };
@@ -127,4 +128,89 @@ async fn a_session_exports_only_the_ca_certificate_and_ends_with_the_lock() {
     service.lock(&admin()).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(tokio::net::TcpStream::connect(&address).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_bindings_need_a_confirmation_and_a_change_ends_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let data_directory = directory.path().join("data");
+    let vault = Vault::new(data_directory.join("secrets.vault")).with_kdf_params(KdfParams {
+        memory_kib: 64,
+        iterations: 1,
+        parallelism: 1,
+    });
+    let mut service = SecretsService::new(vault, vec![ADMIN.into()], data_directory)
+        .with_upstream_roots(rustls::RootCertStore::empty());
+    let now = Instant::now();
+    service.init(&admin(), bytes(PASSWORD), now).unwrap();
+    let http = HttpBinding {
+        host: "api.example.com".into(),
+        header: "Authorization".into(),
+        format: "Bearer {value}".into(),
+        methods: Vec::new(),
+        paths: Vec::new(),
+    };
+    add(&mut service, "api", vec![http.clone()], now);
+    let default_confirm = Binding {
+        agents: vec![AGENT.into()],
+        http: vec![http],
+        ..Binding::default()
+    };
+    service
+        .bind(
+            &admin(),
+            &name("api"),
+            default_confirm.clone(),
+            bytes(PASSWORD),
+            now,
+        )
+        .unwrap();
+    let refused = service
+        .proxy_session(&agent(), &[name("api")], 5, now)
+        .unwrap();
+    assert_eq!(
+        refused,
+        ProxySessionReply::Refused(UseOutcome::NeedsConfirmation)
+    );
+
+    let allowed = Binding {
+        confirm: Some(Confirm::Never),
+        ..default_confirm
+    };
+    service
+        .bind(
+            &admin(),
+            &name("api"),
+            allowed.clone(),
+            bytes(PASSWORD),
+            now,
+        )
+        .unwrap();
+    let ProxySessionReply::Started(session) = service
+        .proxy_session(&agent(), &[name("api")], 5, now)
+        .unwrap()
+    else {
+        panic!("no session");
+    };
+    service
+        .bind(&admin(), &name("api"), allowed, bytes(PASSWORD), now)
+        .unwrap();
+    assert!(
+        !service.revoke_session(&agent(), session.session),
+        "bind kept the session"
+    );
+
+    let ProxySessionReply::Started(session) = service
+        .proxy_session(&agent(), &[name("api")], 5, now)
+        .unwrap()
+    else {
+        panic!("no session");
+    };
+    service
+        .remove(&admin(), &name("api"), bytes(PASSWORD), now)
+        .unwrap();
+    assert!(
+        !service.revoke_session(&agent(), session.session),
+        "remove kept the session"
+    );
 }

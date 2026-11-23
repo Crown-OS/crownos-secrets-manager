@@ -188,7 +188,8 @@ impl SecretsService {
         })
     }
 
-    /// The admin check, then the master password check, then `change`; one audit line.
+    /// The admin check, then the master password check, then `change`; one audit line. A
+    /// change ends every proxy session, so no session keeps a binding that was just removed.
     pub(crate) fn change_vault<Changed>(
         &mut self,
         caller: &Caller,
@@ -203,6 +204,11 @@ impl SecretsService {
             let vault = self.vault.authorize(password.expose_secret(), now)?;
             change(vault)
         });
+        if result.is_ok()
+            && let Some(proxy) = &self.proxy
+        {
+            proxy.revoke_all();
+        }
         audit::admin_call(caller, call, name, result_name(&result));
         result
     }

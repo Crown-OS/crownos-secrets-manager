@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use secrets_core::{SecretKind, SecretName, UseOutcome};
+use secrets_core::{Confirm, SecretKind, SecretName, UseOutcome};
 use secrets_protocol::secrets::Used;
 use secrets_protocol::{RequestId, SecretMeta, SecretRequest, TemplateMeta, VaultStatus};
 
@@ -196,6 +196,13 @@ impl SecretsService {
         if !names.iter().all(|name| contents.contains(name)) {
             return UseCheck::Refused(UseOutcome::Unknown);
         }
+        let default_confirm = rules.settings.default_confirm;
+        let needs_confirmation = entries
+            .iter()
+            .any(|entry| entry.binding.confirm_or(default_confirm) != Confirm::Never);
+        if needs_confirmation {
+            return UseCheck::Refused(UseOutcome::NeedsConfirmation);
+        }
         UseCheck::Passed
     }
 }
@@ -216,5 +223,6 @@ const fn outcome_name(outcome: UseOutcome) -> &'static str {
         UseOutcome::RateLimited => "rate-limited",
         UseOutcome::Locked => "locked",
         UseOutcome::Unknown => "unknown",
+        UseOutcome::NeedsConfirmation => "needs-confirmation",
     }
 }

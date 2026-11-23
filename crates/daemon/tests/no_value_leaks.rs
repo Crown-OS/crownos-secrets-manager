@@ -15,7 +15,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use crownos_ipc::{Pending, ServiceBuilder};
 use crownos_secretsd::{ProcExecutableIdentity, SecretsService};
-use secrets_core::{Binding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome};
+use secrets_core::{
+    Binding, Confirm, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome,
+};
 use secrets_protocol::secrets::{self, Client, Event};
 use secrets_protocol::{ProxySessionReply, RunReply, error_code, transfer};
 use secrets_vault::{KdfParams, Vault};
@@ -146,6 +148,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn bound_to_this_test() -> Binding {
     Binding {
         agents: vec![test_executable()],
+        confirm: Some(Confirm::Never),
         ..Binding::default()
     }
 }

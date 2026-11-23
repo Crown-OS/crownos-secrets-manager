@@ -14,4 +14,7 @@ pub enum UseOutcome {
     Locked,
     /// No secret has this name.
     Unknown,
+    /// The binding asks for a confirmation on screen, which this release cannot show yet. Only
+    /// `confirm: Some(Never)` (or a default of `Never`) allows a use now.
+    NeedsConfirmation,
 }
