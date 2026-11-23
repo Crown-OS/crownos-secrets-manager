@@ -36,6 +36,8 @@ pub struct SecretsService {
     data_directory: PathBuf,
     upstream_roots: Option<rustls::RootCertStore>,
     proxy: Option<Proxy>,
+    /// The bound hosts that the CA of the running proxy covers.
+    proxy_ca_hosts: Option<String>,
     next_session_id: u64,
     bwrap: PathBuf,
 }
@@ -65,6 +67,7 @@ impl SecretsService {
             data_directory,
             upstream_roots: None,
             proxy: None,
+            proxy_ca_hosts: None,
             next_session_id: 1,
             bwrap: PathBuf::from(secrets_run::BWRAP),
         }

@@ -25,7 +25,7 @@ use rustls::RootCertStore;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-pub use authority::CertificateAuthority;
+pub use authority::{CertificateAuthority, GeneratedAuthority};
 pub use error::ProxyError;
 pub use session::SessionSecret;
 

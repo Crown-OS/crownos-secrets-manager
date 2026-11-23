@@ -191,12 +191,44 @@ async fn default_bindings_need_a_confirmation_and_a_change_ends_sessions() {
     else {
         panic!("no session");
     };
+    let first_ca = std::fs::read_to_string(&session.ca_path).unwrap();
+    let moved = Binding {
+        http: vec![HttpBinding {
+            host: "api.other.example".into(),
+            header: "Authorization".into(),
+            format: "Bearer {value}".into(),
+            methods: Vec::new(),
+            paths: Vec::new(),
+        }],
+        ..allowed
+    };
     service
-        .bind(&admin(), &name("api"), allowed, bytes(PASSWORD), now)
+        .bind(&admin(), &name("api"), moved, bytes(PASSWORD), now)
         .unwrap();
     assert!(
         !service.revoke_session(&agent(), session.session),
         "bind kept the session"
+    );
+    let ProxySessionReply::Started(session) = service
+        .proxy_session(&agent(), &[name("api")], 5, now)
+        .unwrap()
+    else {
+        panic!("no session");
+    };
+    let second_ca = std::fs::read_to_string(&session.ca_path).unwrap();
+    assert_ne!(
+        first_ca, second_ca,
+        "the CA did not follow the new bound host"
+    );
+    let ProxySessionReply::Started(_) = service
+        .proxy_session(&agent(), &[name("api")], 5, now)
+        .unwrap()
+    else {
+        panic!("no session");
+    };
+    assert_eq!(
+        std::fs::read_to_string(&session.ca_path).unwrap(),
+        second_ca
     );
 
     let ProxySessionReply::Started(session) = service

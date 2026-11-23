@@ -62,6 +62,7 @@ tokio-rustls = { version = "0.26.1", default-features = false, features = ["ring
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 rustls-native-certs = "0.8"
 rustls-pki-types = "1.11"
+time = { version = "0.3.41", default-features = false, features = ["std"] }
 tempfile = "3.27"
 
 [workspace.lints.rust]

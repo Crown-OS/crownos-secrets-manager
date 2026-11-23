@@ -21,6 +21,10 @@ pub(crate) fn admin_call(caller: &Caller, call: &str, name: Option<&SecretName>,
     tracing::info!(target: AUDIT_TARGET, actor = %caller, call, secret = %name, %outcome, "admin");
 }
 
+pub(crate) fn proxy_authority_made(hosts: &str) {
+    tracing::info!(target: AUDIT_TARGET, %hosts, "new proxy CA");
+}
+
 pub(crate) fn locked_after_timeout() {
     tracing::info!(target: AUDIT_TARGET, "vault locked after the unlock timeout");
 }

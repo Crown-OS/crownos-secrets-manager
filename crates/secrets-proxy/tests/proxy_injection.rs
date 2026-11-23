@@ -230,7 +230,9 @@ fn secret(host: &str) -> SessionSecret {
 async fn the_key_reaches_the_bound_host_and_never_the_agent() {
     let seen = Seen::default();
     let (port, host_roots) = start_host(Arc::clone(&seen)).await;
-    let (authority, _key, _certificate) = CertificateAuthority::generate().unwrap();
+    let authority = CertificateAuthority::generate(&["localhost".into()])
+        .unwrap()
+        .authority;
     let proxy = Proxy::start(authority, host_roots).unwrap();
     let target = format!("localhost:{port}");
     let url = proxy
@@ -327,7 +329,9 @@ async fn the_key_reaches_the_bound_host_and_never_the_agent() {
 async fn a_binding_without_a_port_means_443_and_a_session_ends_mid_tunnel() {
     let seen = Seen::default();
     let (port, host_roots) = start_host(Arc::clone(&seen)).await;
-    let (authority, _key, _certificate) = CertificateAuthority::generate().unwrap();
+    let authority = CertificateAuthority::generate(&["localhost".into()])
+        .unwrap()
+        .authority;
     let proxy = Proxy::start(authority, host_roots).unwrap();
     let target = format!("localhost:{port}");
 

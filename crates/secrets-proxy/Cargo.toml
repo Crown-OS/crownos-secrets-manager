@@ -23,6 +23,7 @@ rustls-native-certs = { workspace = true }
 rustls-pki-types = { workspace = true }
 secrecy = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "io-util", "sync", "time", "macros"] }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }

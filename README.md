@@ -217,8 +217,18 @@ The proxy works like this:
    session, so a removed binding does not live on.
 
 The CA key is made at the first session. It lives only in the vault (as an internal record) and in
-memory. Only the certificate goes to disk. When the vault locks, the daemon stops the proxy: the
-sessions, their values and the CA key go from memory. `revoke_session` ends one session early.
+memory. Only the certificate goes to disk. The CA:
+
+- is valid for one year, and is made again at a session when less than 30 days are left
+- has name constraints that permit only the bound hosts (for `*.example.com`, the subtree
+  `example.com`; for an IP address, that address). A pattern such as `*` permits every name, so
+  then the CA has no constraints.
+- is made again when the set of bound hosts changes, so its constraints follow the bindings
+- has the key usages `keyCertSign` and `cRLSign` only, and a path length of 0
+- signs leaf certificates that are valid for 24 hours
+
+When the vault locks, the daemon stops the proxy: the sessions, their values and the CA key go
+from memory. `revoke_session` ends one session early.
 
 Limits: a value that the host echoes in an encoding that the scrubber does not know reaches the agent (see
 [The scrubber](#the-scrubber)). HTTP/2 is not offered; clients fall back to HTTP/1.1.
