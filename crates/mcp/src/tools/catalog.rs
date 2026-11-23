@@ -48,7 +48,7 @@ pub(crate) fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "kind": { "type": "string", "enum": ["password", "api-key", "token", "env", "note"] },
+                    "kind": { "type": "string", "enum": ["password", "api-key", "token", "env", "note", "username"] },
                     "purpose": { "type": "string" }
                 },
                 "required": ["name", "kind", "purpose"]

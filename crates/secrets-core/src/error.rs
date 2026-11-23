@@ -5,7 +5,7 @@ pub enum CoreError {
         max = crate::MAX_NAME_LENGTH
     )]
     InvalidName,
-    #[error("unknown secret kind `{0}`; use password, api-key, token, env or note")]
+    #[error("unknown secret kind `{0}`; use password, api-key, token, env, note or username")]
     UnknownKind(String),
     #[error("an agent key in a binding is empty")]
     EmptyAgent,
