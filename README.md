@@ -421,8 +421,9 @@ caller gives the window identifier, its app id, and for a browser tab the page o
    `<app id>.desktop` (in `/usr/local/share`, `/usr/share` or the Flatpak exports, never the
    user's own), its `Exec` program as an `exe:` or `interp:` key, or `sandbox:org.flatpak/<id>`
    for a Flatpak app. An app without such an entry, or whose program the user can change, gets
-   no typing. A browser that starts through a launcher (Arch's `/usr/bin/chromium` runs
-   `/usr/lib/chromium/chromium`) does not match yet.
+   no typing. A launcher is replaced by the program it starts (`/usr/bin/chromium` →
+   `/usr/lib/chromium/chromium`), from crownos-config's launcher map and the root-controlled
+   `/etc/crownos/app-launchers.ron`.
 3. Only a `Username` secret is typed into a field that is not a password field. Every other kind
    needs a password field. `fill_login` needs a `Username` secret first and another kind second.
 4. The daemon makes one `crownos_secret_input_request_v1` with the expected app key and adds

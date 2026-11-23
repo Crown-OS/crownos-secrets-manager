@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crownos_config::schema::AppKey;
+use crownos_config::schema::{AppKey, LauncherMap};
 
 use crate::util::desktop_app_key::desktop_app_key;
 use crate::{Caller, ProgramPolicy};
@@ -19,6 +19,7 @@ const SYSTEM_APPLICATION_DIRECTORIES: [&str; 3] = [
 pub struct TypingPolicy {
     callers: ProgramPolicy,
     application_directories: Vec<PathBuf>,
+    launchers: LauncherMap,
 }
 
 impl TypingPolicy {
@@ -33,10 +34,16 @@ impl TypingPolicy {
         )
     }
 
-    pub const fn new(callers: ProgramPolicy, application_directories: Vec<PathBuf>) -> Self {
+    /// With the built-in launchers and those of a root-controlled launcher file.
+    pub fn new(callers: ProgramPolicy, application_directories: Vec<PathBuf>) -> Self {
+        let launchers = LauncherMap::installed().unwrap_or_else(|error| {
+            tracing::warn!(%error, "the launcher file is ignored");
+            LauncherMap::built_in()
+        });
         Self {
             callers,
             application_directories,
+            launchers,
         }
     }
 
@@ -46,6 +53,6 @@ impl TypingPolicy {
 
     /// The key the compositor must find on the window of `app_id`.
     pub fn expected_app_key(&self, app_id: &str) -> Option<AppKey> {
-        desktop_app_key(app_id, &self.application_directories)
+        desktop_app_key(app_id, &self.application_directories, &self.launchers)
     }
 }
