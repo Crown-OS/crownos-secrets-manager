@@ -3,9 +3,8 @@
 //! An agent gets a session: a proxy URL with a random token, and the CA certificate to trust. The
 //! proxy accepts `CONNECT` only to the hosts that the session's HTTP bindings name. It ends TLS
 //! with a certificate from the local CA, adds the bound header to the requests whose host, method
-//! and path match, replaces `crown-secret://<name>` placeholders in headers, and sends the request
-//! on to the real host over verified TLS. Each response comes back scrubbed. The agent never has
-//! the key.
+//! and path match, and sends the request on to the real host over verified TLS. Each response
+//! comes back scrubbed. The agent never has the key.
 
 mod audit;
 mod authority;
@@ -31,9 +30,6 @@ pub use error::ProxyError;
 pub use session::SessionSecret;
 
 use crate::session::{Session, Sessions};
-
-/// The text an agent puts in a header in place of a value.
-pub const PLACEHOLDER_PREFIX: &str = "crown-secret://";
 
 pub(crate) struct Shared {
     sessions: Sessions,

@@ -1,5 +1,9 @@
-//! One request inside a tunnel: add the bound header, replace placeholders, send it on, and
-//! scrub the response.
+//! One request inside a tunnel: add the bound header, send it on, and scrub the response.
+//!
+//! There are no placeholders: the only place a value goes is the header of its own binding. A
+//! request that carries a key cannot ask for a part of a response (`Range`, `If-Range`) or for
+//! another character set (`Accept-Charset`), because both can make the host echo the key in a
+//! form that the scrubber does not know.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -18,7 +22,21 @@ use zeroize::Zeroizing;
 use crate::connect::{ProxyBody, plain_response};
 use crate::scrubbed_body::ScrubbedBody;
 use crate::session::Session;
-use crate::{PLACEHOLDER_PREFIX, Shared, audit};
+use crate::{Shared, audit};
+
+/// Request headers that a request with a key must not carry.
+const HEADERS_REMOVED_WITH_A_KEY: [HeaderName; 3] =
+    [header::RANGE, header::IF_RANGE, header::ACCEPT_CHARSET];
+
+fn refused(
+    actor: &str,
+    authority: &str,
+    status: StatusCode,
+    reason: &'static str,
+) -> Response<ProxyBody> {
+    audit::request_refused(actor, authority, reason);
+    plain_response(status, reason)
+}
 
 pub(crate) async fn forward(
     shared: Arc<Shared>,
@@ -33,22 +51,23 @@ pub(crate) async fn forward(
             "the proxy session is over\n",
         ));
     };
+    let actor = session.actor.as_str();
     let method = request.method().as_str().to_owned();
     let path = match crate::target::pin_to_tunnel(&mut request, &authority) {
         Ok(path) => path,
-        Err(reason) => {
-            audit::request_refused(&session.actor, &authority, reason);
-            return Ok(plain_response(StatusCode::FORBIDDEN, reason));
-        }
+        Err(reason) => return Ok(refused(actor, &authority, StatusCode::FORBIDDEN, reason)),
     };
-    let injected = match prepare(&session, &authority, &method, &path, request.headers_mut()) {
+    let injected = match inject(&session, &authority, &method, &path, request.headers_mut()) {
         Ok(injected) => injected,
-        Err(reason) => {
-            audit::request_refused(&session.actor, &authority, reason);
-            return Ok(plain_response(StatusCode::FORBIDDEN, reason));
+        Err(reason) => return Ok(refused(actor, &authority, StatusCode::FORBIDDEN, reason)),
+    };
+    let response = {
+        let mut sender = sender.lock().await;
+        match sender.ready().await {
+            Ok(()) => sender.send_request(request).await,
+            Err(error) => Err(error),
         }
     };
-    let response = sender.lock().await.send_request(request).await;
     let Ok(response) = response else {
         return Ok(plain_response(
             StatusCode::BAD_GATEWAY,
@@ -56,32 +75,57 @@ pub(crate) async fn forward(
         ));
     };
     audit::request_forwarded(
-        &session.actor,
+        actor,
         &injected,
         &authority,
         &method,
         &path,
         response.status().as_u16(),
     );
-    let compressed = response
-        .headers()
-        .get(header::CONTENT_ENCODING)
-        .is_some_and(|encoding| !encoding.as_bytes().eq_ignore_ascii_case(b"identity"));
-    if compressed {
-        return Ok(plain_response(
+    if !injected.is_empty() && response.status() == StatusCode::PARTIAL_CONTENT {
+        return Ok(refused(
+            actor,
+            &authority,
             StatusCode::BAD_GATEWAY,
-            "the host sent a compressed response, which cannot be scrubbed\n",
+            "the host sent a part of a response to a request with a key\n",
+        ));
+    }
+    if is_encoded(response.headers()) {
+        return Ok(refused(
+            actor,
+            &authority,
+            StatusCode::BAD_GATEWAY,
+            "the host sent an encoded response, which cannot be scrubbed\n",
         ));
     }
     let (mut parts, body) = response.into_parts();
-    scrub_headers(&mut parts.headers, &session.scrubber);
+    parts.headers = scrubbed_headers(&parts.headers, &session.scrubber);
     parts.headers.remove(header::CONTENT_LENGTH);
     let body = ScrubbedBody::new(body, Arc::clone(&session.scrubber)).boxed();
     Ok(Response::from_parts(parts, body))
 }
 
-/// Adds the bound headers and replaces placeholders. Returns the names it used, joined by `,`.
-fn prepare(
+/// Any `Content-Encoding` other than `identity`, or any `Transfer-Encoding` other than
+/// `chunked` or `identity`, in any of the header lines.
+fn is_encoded(headers: &HeaderMap) -> bool {
+    let content = headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
+        .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"));
+    let transfer = headers
+        .get_all(header::TRANSFER_ENCODING)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
+        .any(|coding| {
+            let coding = coding.trim_ascii();
+            !coding.eq_ignore_ascii_case(b"chunked") && !coding.eq_ignore_ascii_case(b"identity")
+        });
+    content || transfer
+}
+
+/// Adds the header of each binding that matches. Returns the names it used, joined by `,`.
+fn inject(
     session: &Session,
     authority: &str,
     method: &str,
@@ -98,7 +142,11 @@ fn prepare(
         .iter()
         .filter_map(|secret| Some((secret, secret.binding_for(authority, method, path)?)))
         .collect();
-    replace_placeholders(headers, &bound)?;
+    if !bound.is_empty() {
+        for name in &HEADERS_REMOVED_WITH_A_KEY {
+            headers.remove(name);
+        }
+    }
     for (secret, binding) in &bound {
         let value = header_value(binding, secret.value.expose_secret())?;
         let name = HeaderName::from_bytes(binding.header.as_bytes())
@@ -127,65 +175,52 @@ fn header_value(binding: &HttpBinding, value: &[u8]) -> Result<HeaderValue, &'st
     Ok(header)
 }
 
-fn replace_placeholders(
-    headers: &mut HeaderMap,
-    bound: &[(&crate::SessionSecret, &HttpBinding)],
-) -> Result<(), &'static str> {
-    for value in headers.values_mut() {
-        let original = value.as_bytes();
-        if !contains(original, PLACEHOLDER_PREFIX.as_bytes()) {
-            continue;
-        }
-        let mut replaced = Zeroizing::new(Vec::with_capacity(original.len() + 64));
-        let mut rest = original;
-        while let Some(start) = find(rest, PLACEHOLDER_PREFIX.as_bytes()) {
-            let (before, from_prefix) = rest.split_at(start);
-            replaced.extend_from_slice(before);
-            let after_prefix = from_prefix
-                .get(PLACEHOLDER_PREFIX.len()..)
-                .unwrap_or_default();
-            let name_length = after_prefix
-                .iter()
-                .position(|&byte| !is_name_byte(byte))
-                .unwrap_or(after_prefix.len());
-            let (name, tail) = after_prefix.split_at(name_length);
-            let secret = bound
-                .iter()
-                .find(|(secret, _)| secret.name.as_str().as_bytes() == name)
-                .ok_or("a placeholder names a secret that is not bound to this request\n")?;
-            replaced.extend_from_slice(secret.0.value.expose_secret());
-            rest = tail;
-        }
-        replaced.extend_from_slice(rest);
-        let mut header = HeaderValue::from_bytes(&replaced)
-            .map_err(|_| "the value cannot go into a header\n")?;
-        header.set_sensitive(true);
-        *value = header;
-    }
-    Ok(())
-}
-
-const fn is_name_byte(byte: u8) -> bool {
-    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    find(haystack, needle).is_some()
-}
-
-fn scrub_headers(headers: &mut HeaderMap, scrubber: &Scrubber) {
-    for value in headers.values_mut() {
+/// Each header line scrubbed. A line whose scrubbed form is not a valid header goes away.
+fn scrubbed_headers(headers: &HeaderMap, scrubber: &Scrubber) -> HeaderMap {
+    let mut clean = HeaderMap::with_capacity(headers.len());
+    for (name, value) in headers {
         let scrubbed = scrubber.scrub(value.as_bytes());
-        if scrubbed != value.as_bytes()
-            && let Ok(clean) = HeaderValue::from_bytes(&scrubbed)
-        {
-            *value = clean;
+        if scrubbed == value.as_bytes() {
+            clean.append(name, value.clone());
+        } else if let Ok(scrubbed) = HeaderValue::from_bytes(&scrubbed) {
+            clean.append(name, scrubbed);
         }
+    }
+    clean
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_encoding_line_counts() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::CONTENT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        assert!(!is_encoded(&headers));
+        headers.append(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        assert!(is_encoded(&headers));
+        let mut chunked = HeaderMap::new();
+        chunked.append(
+            header::TRANSFER_ENCODING,
+            HeaderValue::from_static("gzip, chunked"),
+        );
+        assert!(is_encoded(&chunked));
+    }
+
+    #[test]
+    fn a_header_that_cannot_be_cleaned_goes_away() {
+        let mut scrubber = Scrubber::new();
+        scrubber.add_secret(&secrets_core::SecretName::parse("k").unwrap(), b"key1");
+        let mut headers = HeaderMap::new();
+        headers.append("x-echo", HeaderValue::from_static("Bearer key1"));
+        headers.append("x-plain", HeaderValue::from_static("fine"));
+        let clean = scrubbed_headers(&headers, &scrubber);
+        assert_eq!(clean.get("x-echo").unwrap(), "Bearer [secret:k]");
+        assert_eq!(clean.get("x-plain").unwrap(), "fine");
     }
 }

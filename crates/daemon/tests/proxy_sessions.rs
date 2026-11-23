@@ -99,7 +99,6 @@ async fn a_session_exports_only_the_ca_certificate_and_ends_with_the_lock() {
         panic!("no session");
     };
     assert_eq!(session.expires_in_seconds, 60 * 60);
-    assert_eq!(session.placeholders[0].text, "crown-secret://api");
     let pem = std::fs::read_to_string(&session.ca_path).unwrap();
     assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
     for entry in std::fs::read_dir(&data_directory).unwrap() {

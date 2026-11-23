@@ -5,8 +5,6 @@ use std::time::Instant;
 use secrecy::{ExposeSecret as _, SecretSlice};
 use secrets_core::{HttpBinding, Scrubber, SecretName};
 
-use crate::util::token::same_token;
-
 /// A secret that a session may put into requests.
 pub struct SessionSecret {
     pub name: SecretName,
@@ -89,9 +87,9 @@ impl Sessions {
     pub(crate) fn find(&self, token: &str, now: Instant) -> Option<Arc<Session>> {
         let sessions = self.0.lock().ok()?;
         sessions
-            .iter()
-            .find(|(stored, session)| same_token(stored, token) && now < session.expires_at)
-            .map(|(_, session)| Arc::clone(session))
+            .get(token)
+            .filter(|session| now < session.expires_at)
+            .map(Arc::clone)
     }
 
     pub(crate) fn revoke(&self, id: u64, actor: &str) -> bool {

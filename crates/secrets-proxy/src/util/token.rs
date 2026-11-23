@@ -12,13 +12,3 @@ pub(crate) fn random_token() -> Result<String, ProxyError> {
     }
     Ok(token)
 }
-
-/// Compares in time that does not depend on where the texts differ.
-pub(crate) fn same_token(left: &str, right: &str) -> bool {
-    left.len() == right.len()
-        && left
-            .bytes()
-            .zip(right.bytes())
-            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
-            == 0
-}

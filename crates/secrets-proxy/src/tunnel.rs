@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::{ProxyError, Shared, forward};
+use secrets_core::authority::host_of;
 
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_1_1: &[u8] = b"http/1.1";
@@ -31,14 +32,6 @@ pub(crate) fn upstream_tls_config(
         .with_no_client_auth();
     config.alpn_protocols = vec![HTTP_1_1.to_vec()];
     Ok(config)
-}
-
-/// The host part of `host:port`, without the brackets of an IPv6 address.
-pub(crate) fn host_of(authority: &str) -> &str {
-    let host = authority
-        .rsplit_once(':')
-        .map_or(authority, |(host, _port)| host);
-    host.trim_start_matches('[').trim_end_matches(']')
 }
 
 pub(crate) async fn serve(
@@ -100,16 +93,4 @@ async fn serve_tunnel(
         .await
         .map_err(std::io::Error::other)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::host_of;
-
-    #[test]
-    fn the_host_drops_the_port_and_brackets() {
-        assert_eq!(host_of("api.github.com:443"), "api.github.com");
-        assert_eq!(host_of("[::1]:8443"), "::1");
-        assert_eq!(host_of("localhost"), "localhost");
-    }
 }

@@ -4,7 +4,7 @@ use http::Request;
 use http::header::{self, HeaderValue};
 use http::uri::{PathAndQuery, Uri};
 
-use crate::tunnel::host_of;
+use secrets_core::authority::{host_of, port_of};
 
 /// Makes the request origin-form with `Host` set to the tunnel host, after a check that an
 /// absolute URI or a `Host` header names that host and no other. Returns the path to match.
@@ -43,13 +43,7 @@ pub(crate) fn pin_to_tunnel<Body>(
 
 /// `host` or `host:port` against the tunnel's `host:port`; port 443 may be left out.
 fn same_authority(named: &str, tunnel: &str) -> bool {
-    let tunnel_host = host_of(tunnel);
-    let tunnel_port = tunnel.rsplit_once(':').map_or("443", |(_, port)| port);
-    let (named_host, named_port) = match named.rsplit_once(':') {
-        Some((host, port)) if !host.ends_with(':') && !port.contains(']') => (host_of(named), port),
-        _ => (host_of(named), "443"),
-    };
-    named_host.eq_ignore_ascii_case(tunnel_host) && named_port == tunnel_port
+    host_of(named).eq_ignore_ascii_case(host_of(tunnel)) && port_of(named) == port_of(tunnel)
 }
 
 fn host_header_for(authority: &str) -> String {
@@ -59,17 +53,18 @@ fn host_header_for(authority: &str) -> String {
     }
 }
 
-/// No `.` or `..` segment, no empty segment, and no encoded `.`, `/` or `\`, so a binding for
-/// `/v1/*` cannot reach `/v1/../admin`.
+/// Each segment non-empty (except a final one), not starting with `.`, without `;`, and no
+/// percent-encoded `.`, `/`, `\` or `%`, so a binding for `/v1/*` cannot reach `/v1/../admin`
+/// or `/v1/..;/admin` in any spelling that a host might decode.
 fn is_canonical_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    let encoded_separator = ["%2e", "%2f", "%5c"]
+    let encoded_separator = ["%2e", "%2f", "%5c", "%25"]
         .iter()
         .any(|code| lower.contains(code));
     let segments: Vec<&str> = path.split('/').skip(1).collect();
     let last = segments.len().saturating_sub(1);
     let bad_segment = segments.iter().enumerate().any(|(index, segment)| {
-        matches!(*segment, "." | "..") || (segment.is_empty() && index != last)
+        segment.starts_with('.') || segment.contains(';') || (segment.is_empty() && index != last)
     });
     path.starts_with('/') && !encoded_separator && !path.contains('\\') && !bad_segment
 }

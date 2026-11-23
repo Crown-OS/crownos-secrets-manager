@@ -75,20 +75,12 @@ pub enum RunReply {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Placeholder {
-    pub name: SecretName,
-    /// Put this text in a request header; the proxy replaces it with the value.
-    pub text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxySession {
     pub session: u64,
     /// `http://<user>:<token>@127.0.0.1:<port>`; use it as `HTTPS_PROXY`.
     pub proxy_url: String,
     /// The CA certificate to trust for this proxy, as PEM.
     pub ca_path: String,
-    pub placeholders: Vec<Placeholder>,
     pub expires_in_seconds: u64,
 }
 

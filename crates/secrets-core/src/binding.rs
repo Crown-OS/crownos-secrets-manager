@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::CoreError;
+use crate::authority::{host_of, port_of};
 use crate::wildcard_matches;
 
 /// Where a secret may go. Patterns use `*` for any run of characters.
@@ -26,8 +27,8 @@ pub enum Confirm {
 /// How the HTTPS proxy puts an API key into a request to `host`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpBinding {
-    /// A host pattern, for example `api.github.com` or `*.example.com`. With `:port`, only that
-    /// port matches; without, any port.
+    /// A host pattern, for example `api.github.com` or `*.example.com`, with `:port` for a port
+    /// other than 443.
     pub host: String,
     pub header: String,
     /// The header value, with `{value}` where the secret goes, for example `Bearer {value}`.
@@ -41,15 +42,11 @@ pub struct HttpBinding {
 impl HttpBinding {
     pub const VALUE_PLACEHOLDER: &str = "{value}";
 
-    /// Whether a CONNECT to `authority` (`host:port`) may reach this binding.
+    /// Whether a CONNECT to `authority` (`host:port`) may reach this binding. A binding host
+    /// without a port means port 443 only.
     pub fn matches_authority(&self, authority: &str) -> bool {
-        if self.host.contains(':') {
-            return wildcard_matches(&self.host, authority);
-        }
-        let host = authority
-            .rsplit_once(':')
-            .map_or(authority, |(host, _port)| host);
-        wildcard_matches(&self.host, host)
+        port_of(authority) == port_of(&self.host)
+            && wildcard_matches(host_of(&self.host), host_of(authority))
     }
 
     pub fn matches_request(&self, authority: &str, method: &str, path: &str) -> bool {
@@ -176,6 +173,12 @@ mod tests {
         };
         assert!(with_port.matches_authority("localhost:8443"));
         assert!(!with_port.matches_authority("localhost:9443"));
+        let without_port = HttpBinding {
+            host: "api.example.com".into(),
+            ..with_port
+        };
+        assert!(without_port.matches_authority("api.example.com:443"));
+        assert!(!without_port.matches_authority("api.example.com:8443"));
     }
 
     #[test]

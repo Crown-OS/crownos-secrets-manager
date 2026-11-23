@@ -1,4 +1,4 @@
-//! A local HTTPS host behind the proxy: the key reaches the host, and never the agent.
+//! A local HTTPS host behind the proxy: the key reaches the bound host, and never the agent.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -14,8 +14,10 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use http::{Request, Response};
+use http::header::HeaderValue;
+use http::{HeaderMap, Request, Response, StatusCode};
 use http_body_util::{BodyExt as _, Empty, Full};
+use hyper::client::conn::http1::SendRequest;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
@@ -29,10 +31,40 @@ use tokio::net::{TcpListener, TcpStream};
 
 const VALUE: &str = "sk-PLANTED-proxy-value-42";
 
-type Seen = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+type Seen = Arc<Mutex<Vec<HeaderMap>>>;
 
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
+}
+
+fn host_response(path: &str, headers: &HeaderMap) -> Response<Full<Bytes>> {
+    let shown = |name: &str| {
+        headers
+            .get(name)
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+    };
+    let body = format!(
+        "auth={:?} key={:?} range={:?} path={path}",
+        shown("authorization"),
+        shown("x-key"),
+        shown("range")
+    );
+    let mut response = Response::new(Full::new(Bytes::from(body)));
+    if let Some(authorization) = headers.get("authorization") {
+        response
+            .headers_mut()
+            .insert("x-echo", authorization.clone());
+    }
+    match path {
+        "/v1/partial" => *response.status_mut() = StatusCode::PARTIAL_CONTENT,
+        "/v1/encoded" => {
+            let encodings = response.headers_mut();
+            encodings.append("content-encoding", HeaderValue::from_static("identity"));
+            encodings.append("content-encoding", HeaderValue::from_static("gzip"));
+        }
+        _ => {}
+    }
+    response
 }
 
 /// An HTTPS host on `127.0.0.1` with a certificate for `localhost` from its own CA. It answers
@@ -70,27 +102,8 @@ async fn start_host(seen: Seen) -> (u16, RootCertStore) {
                     return;
                 };
                 let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-                    let header = |name: &str| {
-                        request
-                            .headers()
-                            .get(name)
-                            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
-                    };
-                    let authorization = header("authorization");
-                    let key = header("x-key");
-                    seen.lock()
-                        .unwrap()
-                        .push((authorization.clone(), key.clone()));
-                    let body = format!(
-                        "auth={authorization:?} key={key:?} path={}",
-                        request.uri().path()
-                    );
-                    let mut response = Response::new(Full::new(Bytes::from(body)));
-                    if let Some(authorization) = authorization {
-                        response
-                            .headers_mut()
-                            .insert("x-echo", authorization.parse().unwrap());
-                    }
+                    seen.lock().unwrap().push(request.headers().clone());
+                    let response = host_response(request.uri().path(), request.headers());
                     async move { Ok::<_, Infallible>(response) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
@@ -117,7 +130,7 @@ fn proxy_roots(proxy: &Proxy) -> RootCertStore {
     roots
 }
 
-/// Sends `CONNECT target` and returns the status code and, on 200, the open stream.
+/// Sends `CONNECT target` and returns the status code and the stream.
 async fn connect(proxy: SocketAddr, token: &str, target: &str) -> (u16, TcpStream) {
     let mut stream = TcpStream::connect(proxy).await.unwrap();
     let credentials = STANDARD.encode(format!("crownos:{token}"));
@@ -141,46 +154,55 @@ async fn connect(proxy: SocketAddr, token: &str, target: &str) -> (u16, TcpStrea
     (status, stream)
 }
 
-/// A request through an open tunnel; returns the status, the `x-echo` header and the body.
-async fn request_through(
-    stream: TcpStream,
-    roots: RootCertStore,
-    host: &str,
-    method: &str,
-    path: &str,
-    key_header: Option<&str>,
-) -> (u16, Option<String>, String) {
+/// A TLS connection through the tunnel, ready for several requests.
+async fn open_tunnel(proxy: &Proxy, token: &str, target: &str) -> SendRequest<Empty<Bytes>> {
+    let (status, stream) = connect(proxy.address(), token, target).await;
+    assert_eq!(status, 200);
     let config = rustls::ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
         .unwrap()
-        .with_root_certificates(roots)
+        .with_root_certificates(proxy_roots(proxy))
         .with_no_client_auth();
     let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
         .connect(ServerName::try_from("localhost").unwrap(), stream)
         .await
         .unwrap();
-    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+    let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
         .await
         .unwrap();
     tokio::spawn(connection);
-    let mut request = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("host", host);
-    if let Some(key) = key_header {
-        request = request.header("x-key", key);
+    sender
+}
+
+struct Answer {
+    status: u16,
+    headers: HeaderMap,
+    body: String,
+}
+
+async fn send(
+    sender: &mut SendRequest<Empty<Bytes>>,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &[u8])],
+) -> Answer {
+    let mut request = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, HeaderValue::from_bytes(value).unwrap());
     }
+    sender.ready().await.unwrap();
     let response = sender
         .send_request(request.body(Empty::<Bytes>::new()).unwrap())
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let echo = response
-        .headers()
-        .get("x-echo")
-        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+    let headers = response.headers().clone();
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    (status, echo, String::from_utf8_lossy(&body).into_owned())
+    Answer {
+        status,
+        headers,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }
 }
 
 fn token_of(url: &str) -> String {
@@ -190,115 +212,105 @@ fn token_of(url: &str) -> String {
         .unwrap()
 }
 
+fn secret(host: &str) -> SessionSecret {
+    SessionSecret {
+        name: SecretName::parse("api").unwrap(),
+        value: SecretSlice::from(VALUE.as_bytes().to_vec()),
+        http: vec![HttpBinding {
+            host: host.into(),
+            header: "Authorization".into(),
+            format: "Bearer {value}".into(),
+            methods: vec!["GET".into()],
+            paths: vec!["/v1/*".into()],
+        }],
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_key_reaches_the_bound_host_and_never_the_agent() {
     let seen = Seen::default();
     let (port, host_roots) = start_host(Arc::clone(&seen)).await;
     let (authority, _key, _certificate) = CertificateAuthority::generate().unwrap();
     let proxy = Proxy::start(authority, host_roots).unwrap();
-    let secret = SessionSecret {
-        name: SecretName::parse("api").unwrap(),
-        value: SecretSlice::from(VALUE.as_bytes().to_vec()),
-        http: vec![HttpBinding {
-            host: "localhost".into(),
-            header: "Authorization".into(),
-            format: "Bearer {value}".into(),
-            methods: vec!["GET".into()],
-            paths: vec!["/v1/*".into()],
-        }],
-    };
+    let target = format!("localhost:{port}");
     let url = proxy
-        .open_session(7, "agent", vec![secret], Duration::from_secs(60))
+        .open_session(7, "agent", vec![secret(&target)], Duration::from_secs(60))
         .unwrap();
     let token = token_of(&url);
-    let target = format!("localhost:{port}");
+    let host = target.as_bytes();
+    let mut tunnel = open_tunnel(&proxy, &token, &target).await;
 
-    let (status, stream) = connect(proxy.address(), &token, &target).await;
-    assert_eq!(status, 200);
-    let (status, echo, body) = request_through(
-        stream,
-        proxy_roots(&proxy),
-        &target,
+    let answer = send(
+        &mut tunnel,
         "GET",
         "/v1/echo",
-        Some("crown-secret://api"),
+        &[
+            ("host", host),
+            ("x-key", b"crown-secret://api"),
+            ("range", b"bytes=0-3"),
+            ("accept-charset", b"utf-16"),
+        ],
     )
     .await;
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(answer.status, 200, "{}", answer.body);
     let host_saw = seen.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(host_saw.0.as_deref(), Some(&*format!("Bearer {VALUE}")));
-    assert_eq!(host_saw.1.as_deref(), Some(VALUE));
-    assert!(!body.contains(VALUE), "{body}");
-    assert!(body.contains("[secret:api]"), "{body}");
-    assert_eq!(echo.as_deref(), Some("Bearer [secret:api]"));
-
-    let (_, stream) = connect(proxy.address(), &token, &target).await;
-    let (status, _, body) = request_through(
-        stream,
-        proxy_roots(&proxy),
-        &target,
-        "POST",
-        "/v1/echo",
-        None,
-    )
-    .await;
-    assert_eq!(status, 200);
     assert_eq!(
-        seen.lock().unwrap().last().cloned().unwrap().0,
-        None,
-        "{body}"
+        host_saw.get("authorization").unwrap(),
+        &*format!("Bearer {VALUE}")
+    );
+    assert_eq!(
+        host_saw.get("x-key").unwrap(),
+        "crown-secret://api",
+        "placeholders are gone"
+    );
+    assert!(host_saw.get("range").is_none() && host_saw.get("accept-charset").is_none());
+    assert!(
+        !answer.body.contains(VALUE) && answer.body.contains("[secret:api]"),
+        "{}",
+        answer.body
+    );
+    assert_eq!(answer.headers.get("x-echo").unwrap(), "Bearer [secret:api]");
+
+    let answer = send(&mut tunnel, "POST", "/v1/echo", &[("host", host)]).await;
+    assert_eq!(answer.status, 200);
+    assert!(
+        seen.lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .get("authorization")
+            .is_none()
     );
 
-    let (_, stream) = connect(proxy.address(), &token, &target).await;
-    let (status, _, _) = request_through(
-        stream,
-        proxy_roots(&proxy),
-        &target,
-        "GET",
-        "/v2/other",
-        Some("crown-secret://api"),
-    )
-    .await;
-    assert_eq!(status, 403);
+    let answer = send(&mut tunnel, "GET", "/v1/partial", &[("host", host)]).await;
+    assert_eq!(answer.status, 502, "a 206 to a request with a key");
+    let answer = send(&mut tunnel, "GET", "/v1/encoded", &[("host", host)]).await;
+    assert_eq!(answer.status, 502, "a second Content-Encoding line");
 
-    let (_, stream) = connect(proxy.address(), &token, &target).await;
+    let reached = seen.lock().unwrap().len();
     let other_host = format!("admin.localhost:{port}");
-    let (status, _, _) = request_through(
-        stream,
-        proxy_roots(&proxy),
-        &other_host,
-        "GET",
-        "/v1/echo",
-        None,
-    )
-    .await;
-    assert_eq!(status, 403, "another virtual host on the same server");
-    let (_, stream) = connect(proxy.address(), &token, &target).await;
-    let (status, _, _) = request_through(
-        stream,
-        proxy_roots(&proxy),
-        &target,
-        "GET",
-        "/v1/../admin",
-        None,
-    )
-    .await;
-    assert_eq!(status, 403, "a dot segment out of the bound path");
-    let before = seen.lock().unwrap().len();
-    let (_, stream) = connect(proxy.address(), &token, &target).await;
-    let (status, _, _) = request_through(
-        stream,
-        proxy_roots(&proxy),
-        &target,
-        "GET",
-        "/v1/%2e%2e/admin",
-        None,
-    )
-    .await;
-    assert_eq!(status, 403, "an encoded dot segment");
+    let refusals: [(&str, &[u8]); 7] = [
+        ("/v1/echo", other_host.as_bytes()),
+        ("/v1/echo", b"local\xffhost"),
+        ("/v1/../admin", host),
+        ("/v1/%2e%2e/admin", host),
+        ("/v1/%252e%252e/admin", host),
+        ("/v1/..;/admin", host),
+        ("https://evil.example/v1/echo", host),
+    ];
+    for (uri, host_header) in refusals {
+        let mut tunnel = open_tunnel(&proxy, &token, &target).await;
+        let answer = send(&mut tunnel, "GET", uri, &[("host", host_header)]).await;
+        assert_eq!(
+            answer.status,
+            403,
+            "{uri} {}",
+            String::from_utf8_lossy(host_header)
+        );
+    }
     assert_eq!(
         seen.lock().unwrap().len(),
-        before,
+        reached,
         "a refused request reached the host"
     );
 
@@ -306,8 +318,57 @@ async fn the_key_reaches_the_bound_host_and_never_the_agent() {
     assert_eq!(status, 403);
     let (status, _) = connect(proxy.address(), "not-the-token", &target).await;
     assert_eq!(status, 407);
-
     assert!(proxy.revoke_session(7, "agent"));
     let (status, _) = connect(proxy.address(), &token, &target).await;
     assert_eq!(status, 407);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_binding_without_a_port_means_443_and_a_session_ends_mid_tunnel() {
+    let seen = Seen::default();
+    let (port, host_roots) = start_host(Arc::clone(&seen)).await;
+    let (authority, _key, _certificate) = CertificateAuthority::generate().unwrap();
+    let proxy = Proxy::start(authority, host_roots).unwrap();
+    let target = format!("localhost:{port}");
+
+    let url = proxy
+        .open_session(
+            1,
+            "agent",
+            vec![secret("localhost")],
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    let (status, _) = connect(proxy.address(), &token_of(&url), &target).await;
+    assert_eq!(status, 403, "a binding without a port reached port {port}");
+
+    let url = proxy
+        .open_session(
+            2,
+            "agent",
+            vec![secret(&target)],
+            Duration::from_millis(800),
+        )
+        .unwrap();
+    let mut tunnel = open_tunnel(&proxy, &token_of(&url), &target).await;
+    let first = send(
+        &mut tunnel,
+        "GET",
+        "/v1/echo",
+        &[("host", target.as_bytes())],
+    )
+    .await;
+    assert_eq!(first.status, 200);
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let second = send(
+        &mut tunnel,
+        "GET",
+        "/v1/echo",
+        &[("host", target.as_bytes())],
+    )
+    .await;
+    assert_eq!(
+        second.status, 403,
+        "the expired session still sent a request"
+    );
 }

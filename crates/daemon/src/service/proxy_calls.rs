@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use secrecy::{ExposeSecret as _, SecretSlice};
 use secrets_core::SecretName;
-use secrets_protocol::{Placeholder, ProxySession, ProxySessionReply};
-use secrets_proxy::{CertificateAuthority, PLACEHOLDER_PREFIX, Proxy, SessionSecret};
+use secrets_protocol::{ProxySession, ProxySessionReply};
+use secrets_proxy::{CertificateAuthority, Proxy, SessionSecret};
 
 use super::{SecretsService, ServiceError};
 use crate::{Caller, audit};
@@ -68,13 +68,6 @@ impl SecretsService {
             session: id,
             proxy_url,
             ca_path: ca_path.to_string_lossy().into_owned(),
-            placeholders: names
-                .iter()
-                .map(|name| Placeholder {
-                    name: name.clone(),
-                    text: format!("{PLACEHOLDER_PREFIX}{name}"),
-                })
-                .collect(),
             expires_in_seconds: lifetime.as_secs(),
         }))
     }

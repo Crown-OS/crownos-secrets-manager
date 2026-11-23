@@ -5,6 +5,7 @@
 //! the [`Scrubber`] that removes a value and its common encodings from text before a model can
 //! read it.
 
+pub mod authority;
 pub mod binding;
 mod error;
 mod kind;

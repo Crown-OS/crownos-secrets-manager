@@ -78,9 +78,8 @@ pub(crate) fn proxy_result(reply: ProxySessionReply) -> CallToolResult {
             "session": session.session,
             "proxy_url": session.proxy_url,
             "ca_path": session.ca_path,
-            "placeholders": session.placeholders,
             "expires_in_seconds": session.expires_in_seconds,
-            "how_to_use": "Set HTTPS_PROXY to proxy_url and trust ca_path (curl --cacert, SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE). The proxy adds the bound header itself; a placeholder in a header is replaced too. Only the bound hosts are reachable.",
+            "how_to_use": "Set HTTPS_PROXY to proxy_url and trust ca_path (curl --cacert, SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE). The proxy adds the bound header itself, only for the bound host, method and path. Only the bound hosts are reachable.",
         })),
         ProxySessionReply::Refused(outcome) => use_result(outcome),
         ProxySessionReply::NoHttpBinding(name) => failure(format!(

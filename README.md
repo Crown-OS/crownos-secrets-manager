@@ -189,31 +189,38 @@ names. Each secret must allow the agent and must have an `http` binding. The ans
 - `ca_path`: `$XDG_DATA_HOME/crownos/secrets-ca.pem`, the certificate of the local CA. Trust it for
   this client only (`curl --cacert`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`).
   Do not add it to the system store.
-- `placeholders`: `crown-secret://<name>` for each secret.
 - `expires_in_seconds`: the session ends after `ttl_minutes`, at most 60.
 
 The proxy works like this:
 
 1. It accepts only `CONNECT`, with the session token in `Proxy-Authorization`. A wrong or old
-   token gets 407. A host that no `http` binding of the session names gets 403.
+   token gets 407. A host that no `http` binding of the session names gets 403. A binding host
+   without a port means port 443 only.
 2. It ends TLS with a certificate for the host from the local CA, and opens TLS to the real host.
    It checks the real host against the system CA store.
-3. For each request, it adds the bound header (for example `Authorization: Bearer <value>`) only
-   when the host, the method and the path match the binding. It replaces a placeholder in any
-   request header with the value, but only for a secret that is bound to this request; another
-   placeholder gets 403.
-4. It asks for `Accept-Encoding: identity`, and refuses a compressed response, because the
-   scrubber cannot read compressed bytes.
-5. It scrubs the response headers and, as it streams, the response body. It drops trailers.
-6. It writes an audit line for each request with the secret names, the host, the method, the path
+3. Each request must name the tunnel host: an absolute URI or a `Host` header for another host
+   (a second virtual host on the same server, for example) gets 403. The path must be canonical:
+   no empty segment, no segment that starts with `.` or holds `;`, and no `%2e`, `%2f`, `%5c` or
+   `%25`.
+4. It adds the bound header (for example `Authorization: Bearer <value>`) only when the host, the
+   method and the path match the binding. A value goes nowhere else: there are no placeholders.
+   A request with a key loses its `Range`, `If-Range` and `Accept-Charset` headers, and a `206`
+   answer to it is refused, because a part or another character set of an echoed key could pass
+   the scrubber.
+5. It asks for `Accept-Encoding: identity`, and refuses a response with any `Content-Encoding`
+   other than `identity` or a `Transfer-Encoding` other than `chunked`, in any header line.
+6. It scrubs each response header line (a line that is not a valid header after scrubbing goes
+   away) and, as it streams, the response body. It drops trailers.
+7. It writes an audit line for each request with the secret names, the host, the method, the path
    and the status. It never writes a value.
+8. Each change to the vault (`add`, `remove`, `bind`, `set_template`, `configure`) ends every
+   session, so a removed binding does not live on.
 
 The CA key is made at the first session. It lives only in the vault (as an internal record) and in
 memory. Only the certificate goes to disk. When the vault locks, the daemon stops the proxy: the
 sessions, their values and the CA key go from memory. `revoke_session` ends one session early.
 
-Limits: the request body goes to the host unchanged, so a placeholder in a body is not replaced.
-A value that the host echoes in an encoding that the scrubber does not know reaches the agent (see
+Limits: a value that the host echoes in an encoding that the scrubber does not know reaches the agent (see
 [The scrubber](#the-scrubber)). HTTP/2 is not offered; clients fall back to HTTP/1.1.
 
 ## Run templates (S3)

@@ -90,7 +90,7 @@ pub(crate) fn tools() -> Vec<Tool> {
         ),
         tool(
             "secrets_http_session",
-            "Starts an HTTPS proxy session. Requests through the proxy to a secret's bound host get the API key added by CrownOS; responses come back scrubbed. Returns the proxy URL, the CA file to trust and header placeholders. Never returns the value.",
+            "Starts an HTTPS proxy session. Requests through the proxy to a secret's bound host get the API key added by CrownOS; responses come back scrubbed. Returns the proxy URL and the CA file to trust. Never returns the value.",
             json!({
                 "type": "object",
                 "properties": {
