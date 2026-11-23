@@ -1,0 +1,38 @@
+# Maintainer: marvelxcodes <ramakrishnan0046@gmail.com>
+#
+# Builds the checkout this file lives in, so run makepkg from packaging/ with
+# the sibling path dependencies checked out next to the repository:
+# ../crownos-config and ../crownos-ipc.
+
+pkgname=crownos-secrets-manager
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="The CrownOS secrets manager: agents use secrets by name and never read a value"
+arch=(x86_64)
+url="https://github.com/Crown-OS/crownos-secrets-manager"
+license=('MIT OR Apache-2.0')
+depends=(glibc gcc-libs systemd)
+makedepends=(cargo)
+options=(!lto !debug)
+
+_workspace="$startdir/.."
+
+prepare() {
+  cd "$_workspace"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$_workspace"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --frozen -p crownos-secretsd -p crownos-secrets -p crownos-secrets-mcp
+}
+
+package() {
+  cd "$_workspace"
+  install -Dm755 "$srcdir"/target/release/{crownos-secretsd,crownos-secrets,crownos-secrets-mcp} -t "$pkgdir/usr/bin"
+  install -Dm644 packaging/systemd/crownos-secretsd.service -t "$pkgdir/usr/lib/systemd/user"
+  install -d "$pkgdir/usr/lib/systemd/user/default.target.wants"
+  ln -s ../crownos-secretsd.service "$pkgdir/usr/lib/systemd/user/default.target.wants/crownos-secretsd.service"
+  install -Dm644 LICENSE-{MIT,APACHE} -t "$pkgdir/usr/share/licenses/$pkgname"
+}
