@@ -1,0 +1,27 @@
+[package]
+name = "secrets-vault"
+description = "The encrypted vault file of the CrownOS secrets manager: Argon2id from a master password, XChaCha20-Poly1305, atomic writes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+secrets-core = { workspace = true }
+
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+getrandom = { workspace = true }
+region = { workspace = true }
+rustix = { workspace = true }
+secrecy = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
