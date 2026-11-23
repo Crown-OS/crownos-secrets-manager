@@ -235,7 +235,10 @@ fn removing_replacing_and_rule_changes_persist() {
         .change_rules(|rules| rules.settings.lock_after_minutes = 3)
         .unwrap();
     vault
-        .set_internal("proxy-ca-key", secret(b"ca key"))
+        .set_internals(vec![
+            ("proxy-ca-key", secret(b"ca key")),
+            ("other", secret(b"x")),
+        ])
         .unwrap();
     let reopened = OpenVault::open(&path, PASSWORD).unwrap();
     assert!(!reopened.contains(&name("mail")));
@@ -245,6 +248,7 @@ fn removing_replacing_and_rule_changes_persist() {
         reopened.internal("proxy-ca-key").unwrap().expose_secret(),
         b"ca key"
     );
+    assert_eq!(reopened.internal("other").unwrap().expose_secret(), b"x");
     assert_eq!(
         reopened
             .value(&name("github_token"))

@@ -65,7 +65,9 @@ impl HttpBinding {
                 .header
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
-        if self.host.is_empty()
+        let host = host_of(&self.host);
+        if host.is_empty()
+            || host.ends_with('*')
             || !header_is_token
             || !self.format.contains(Self::VALUE_PLACEHOLDER)
         {
@@ -192,6 +194,18 @@ mod tests {
             paths: Vec::new(),
         });
         assert_eq!(binding.validate(), Err(CoreError::InvalidHttpBinding));
+        for host in ["*", "api.*", "api.*:8443"] {
+            let mut open_ended = binding.clone();
+            if let Some(http) = open_ended.http.first_mut() {
+                http.host = host.into();
+                http.format = "Bearer {value}".into();
+            }
+            assert_eq!(
+                open_ended.validate(),
+                Err(CoreError::InvalidHttpBinding),
+                "{host}"
+            );
+        }
         if let Some(http) = binding.http.first_mut() {
             http.format = "Bearer {value}".into();
         }

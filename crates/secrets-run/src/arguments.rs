@@ -41,6 +41,7 @@ fn is_variable_name(name: &str) -> bool {
 pub(crate) fn bwrap_options(
     template: &RunTemplate,
     cwd: Option<&Path>,
+    marker: &str,
     environment: &[(String, SecretSlice<u8>)],
 ) -> Result<Zeroizing<Vec<u8>>, SandboxError> {
     let capacity = 1024
@@ -110,6 +111,9 @@ pub(crate) fn bwrap_options(
         "LANG",
         "C.UTF-8",
     ])?;
+    if cwd.is_some() {
+        list.push_all(&["--setenv", MARKER_VARIABLE, marker])?;
+    }
     for (name, value) in environment {
         if !is_variable_name(name) {
             return Err(SandboxError::InvalidVariableName(name.clone()));
@@ -130,11 +134,14 @@ pub(crate) fn bwrap_options(
 const RUN_WITHOUT_INPUT: &str = "exec \"$@\" < /dev/null";
 
 /// The same, after a check that the working directory is still the one the daemon checked:
-/// a directory swapped for a link between the check and the bind fails here.
-const RUN_IN_CHECKED_DIRECTORY: &str = "test \"$(/usr/bin/stat -c %d:%i -- .)\" = \"$1\" || { echo 'crownos-secrets: the working directory changed after the check' >&2; exit 125; }; shift; exec \"$@\" < /dev/null";
+/// a directory swapped for a link between the check and the bind stops here. The shell reports
+/// it with a marker that only the daemon knows: it reads the marker from the environment, drops
+/// it before the command starts, and prints it on stderr, where the daemon looks for it. So the
+/// command cannot fake the report, and an exit code of the command means nothing here.
+const RUN_IN_CHECKED_DIRECTORY: &str = "marker=$CROWNOS_SECRETS_RUN_MARKER; unset CROWNOS_SECRETS_RUN_MARKER; test \"$(/usr/bin/stat -c %d:%i -- .)\" = \"$1\" || { printf '%s\\n' \"$marker\" >&2; exit 125; }; shift; exec \"$@\" < /dev/null";
 
-/// The exit code of a run whose working directory changed after the check.
-pub const DIRECTORY_CHANGED_EXIT_CODE: i32 = 125;
+/// The variable that carries the marker into the sandbox shell.
+pub(crate) const MARKER_VARIABLE: &str = "CROWNOS_SECRETS_RUN_MARKER";
 
 /// bwrap's own arguments after `--args 0`: the shell, then the template command and the
 /// caller's arguments.
@@ -182,10 +189,10 @@ mod tests {
             command: vec!["true".into()],
             ..RunTemplate::default()
         };
-        let list = bwrap_options(&template, None, &[]).unwrap();
+        let list = bwrap_options(&template, None, "m", &[]).unwrap();
         assert!(parts(&list).contains(&"--unshare-net".to_owned()));
         template.network = vec!["api.github.com".into()];
-        let list = bwrap_options(&template, None, &[]).unwrap();
+        let list = bwrap_options(&template, None, "m", &[]).unwrap();
         assert!(!parts(&list).contains(&"--unshare-net".to_owned()));
     }
 
@@ -196,7 +203,7 @@ mod tests {
             ..RunTemplate::default()
         };
         let environment = [("GH_TOKEN".to_owned(), SecretSlice::from(b"value".to_vec()))];
-        let list = bwrap_options(&template, None, &environment).unwrap();
+        let list = bwrap_options(&template, None, "m", &environment).unwrap();
         let parts = parts(&list);
         let setenv = parts.iter().position(|part| part == "GH_TOKEN").unwrap();
         assert_eq!(parts[setenv - 1], "--setenv");
@@ -215,12 +222,12 @@ mod tests {
         };
         let bad_name = [("1X".to_owned(), SecretSlice::from(b"v".to_vec()))];
         assert!(matches!(
-            bwrap_options(&template, None, &bad_name),
+            bwrap_options(&template, None, "m", &bad_name),
             Err(SandboxError::InvalidVariableName(_))
         ));
         let nul_value = [("X".to_owned(), SecretSlice::from(b"a\0b".to_vec()))];
         assert!(matches!(
-            bwrap_options(&template, None, &nul_value),
+            bwrap_options(&template, None, "m", &nul_value),
             Err(SandboxError::ValueWithNul(_))
         ));
         let arguments = ["a\0".to_owned()];

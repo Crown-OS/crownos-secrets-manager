@@ -78,10 +78,15 @@ fn authority_parameters() -> CertificateParams {
     parameters
 }
 
-/// Permitted subtrees for the bound host patterns: the DNS suffix after the last `*`, or the
-/// single IP address. `None` when a pattern permits every name, such as `*`.
+/// Subtrees for the bound host patterns. An exact host permits that name and its subdomains; a
+/// pattern with `*` permits only names under the part after the last `*` (`a*b` permits
+/// `x.b`, not `b`); an IP address permits only itself. With no IP host, every IP address is
+/// excluded; with no DNS host, every DNS name. `None` when a pattern cannot be expressed, such as
+/// one that ends in `*` (bindings refuse those).
 fn name_constraints(host_patterns: &[String]) -> Option<NameConstraints> {
     let mut permitted = Vec::with_capacity(host_patterns.len());
+    let mut any_address = false;
+    let mut any_name = false;
     for pattern in host_patterns {
         let host = host_of(pattern);
         if let Ok(address) = host.parse::<IpAddr>() {
@@ -89,21 +94,39 @@ fn name_constraints(host_patterns: &[String]) -> Option<NameConstraints> {
             permitted.push(GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(
                 address, prefix,
             )));
+            any_address = true;
             continue;
         }
-        let suffix = host
-            .rsplit('*')
-            .next()
-            .unwrap_or(host)
-            .trim_start_matches('.');
-        if suffix.is_empty() {
-            return None;
-        }
-        permitted.push(GeneralSubtree::DnsName(suffix.to_owned()));
+        let constraint = match host.rsplit_once('*') {
+            Some((_, suffix)) => {
+                let suffix = suffix.trim_start_matches('.');
+                if suffix.is_empty() {
+                    return None;
+                }
+                format!(".{suffix}")
+            }
+            None => host.to_owned(),
+        };
+        permitted.push(GeneralSubtree::DnsName(constraint));
+        any_name = true;
+    }
+    let mut excluded = Vec::new();
+    if !any_address {
+        excluded.push(GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(
+            IpAddr::from([0, 0, 0, 0]),
+            0,
+        )));
+        excluded.push(GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(
+            IpAddr::from([0u16; 8]),
+            0,
+        )));
+    }
+    if !any_name {
+        excluded.push(GeneralSubtree::DnsName(String::new()));
     }
     (!permitted.is_empty()).then_some(NameConstraints {
         permitted_subtrees: permitted,
-        excluded_subtrees: Vec::new(),
+        excluded_subtrees: excluded,
     })
 }
 
@@ -226,16 +249,26 @@ mod tests {
             CertificateAuthority::generate(&["*.github.com".into(), "localhost:8443".into()])
                 .unwrap();
         assert!(verifies(&authority, "api.github.com"));
+        assert!(
+            !verifies(&authority, "github.com"),
+            "a wildcard permitted its bare suffix"
+        );
         assert!(verifies(&authority, "localhost"));
         assert!(!verifies(&authority, "bank.example"));
+        assert!(!verifies(&authority, "127.0.0.1"), "no IP host is bound");
+
+        let addresses = CertificateAuthority::generate(&["127.0.0.1:8443".into()]).unwrap();
+        assert!(verifies(&addresses, "127.0.0.1"));
+        assert!(!verifies(&addresses, "localhost"), "no DNS host is bound");
         let year = 365 * 24 * 60 * 60;
         let left = authority.expires_at - OffsetDateTime::now_utc().unix_timestamp();
         assert!((year - 60..=year).contains(&left), "{left}");
     }
 
     #[test]
-    fn a_pattern_for_every_name_gives_no_constraints() {
+    fn a_pattern_that_ends_in_a_star_gives_no_constraints() {
         assert!(name_constraints(&["*".into()]).is_none());
+        assert!(name_constraints(&["api.*".into()]).is_none());
         assert!(name_constraints(&["127.0.0.1:8443".into()]).is_some());
     }
 }

@@ -12,8 +12,7 @@ use base64::Engine as _;
 use secrecy::SecretSlice;
 use secrets_core::{RunTemplate, Scrubber, SecretName};
 use secrets_run::{
-    CheckedDirectory, DIRECTORY_CHANGED_EXIT_CODE, Launcher, SandboxError, SandboxOutput,
-    SandboxRequest, run_in_sandbox,
+    CheckedDirectory, Launcher, SandboxError, SandboxOutput, SandboxRequest, run_in_sandbox,
 };
 
 const VALUE: &str = "ghp_PLANTED_run_value_0123456789";
@@ -199,13 +198,12 @@ async fn a_directory_swapped_after_the_check_stops_the_run() {
     let output = run(&launcher, &shell_template("echo ran"), Some(&swapped))
         .await
         .unwrap();
-    assert_eq!(
-        output.exit_code,
-        Some(DIRECTORY_CHANGED_EXIT_CODE),
-        "{output:?}"
-    );
+    assert!(output.cwd_changed, "{output:?}");
     assert!(!text(&output.stdout).contains("ran"));
-    assert!(text(&output.stderr).contains("working directory changed"));
+    let forged = run(&launcher, &shell_template("echo ran; exit 125"), None)
+        .await
+        .unwrap();
+    assert!(!forged.cwd_changed, "an exit code faked the report");
 }
 
 #[tokio::test]

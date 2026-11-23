@@ -9,10 +9,7 @@ use std::time::Instant;
 use secrecy::{ExposeSecret as _, SecretSlice};
 use secrets_core::{ArgumentRefusal, RunTemplate, Scrubber, SecretName, TemplateName, UseOutcome};
 use secrets_protocol::{RunOutput, RunReply};
-use secrets_run::{
-    CheckedDirectory, DIRECTORY_CHANGED_EXIT_CODE, Launcher, SandboxError, SandboxRequest,
-    run_in_sandbox,
-};
+use secrets_run::{CheckedDirectory, Launcher, SandboxError, SandboxRequest, run_in_sandbox};
 use tokio::sync::OwnedSemaphorePermit;
 
 use super::{SecretsService, ServiceError};
@@ -164,8 +161,8 @@ impl SecretsService {
         Ok((environment, Arc::new(scrubber)))
     }
 
-    /// The canonical directory must match the template's pattern and must not be inside the
-    /// daemon's data or runtime directory. So `..` and links cannot leave the pattern, and a
+    /// The canonical directory must match the template's pattern and must neither be inside the
+    /// daemon's data or runtime directory nor hold one of them. So `..` and links cannot leave the pattern, and a
     /// command cannot reach the vault or the sockets.
     fn checked_cwd(&self, template: &RunTemplate, cwd: &str) -> CwdCheck {
         if template.cwd_glob.is_empty() {
@@ -182,10 +179,9 @@ impl SecretsService {
         let Ok(directory) = CheckedDirectory::check(path) else {
             return CwdCheck::Refused;
         };
-        let inside_protected = self
-            .protected_directories
-            .iter()
-            .any(|protected| directory.path().starts_with(protected));
+        let inside_protected = self.protected_directories.iter().any(|protected| {
+            directory.path().starts_with(protected) || protected.starts_with(directory.path())
+        });
         let allowed = directory
             .path()
             .to_str()
@@ -225,9 +221,7 @@ impl RunJob {
             scrubber: self.scrubber,
         };
         match run_in_sandbox(request).await {
-            Ok(output)
-                if output.exit_code == Some(DIRECTORY_CHANGED_EXIT_CODE) && self.cwd.is_some() =>
-            {
+            Ok(output) if output.cwd_changed => {
                 audit::use_decided(&self.caller, &self.names, &self.target, "cwd-changed");
                 Ok(RunReply::CwdChanged)
             }

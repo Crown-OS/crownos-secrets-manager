@@ -13,7 +13,7 @@ enum RecordChange<'change> {
     None,
     PutSecret(&'change SecretName, &'change [u8]),
     DropSecret(&'change SecretName),
-    PutInternal(&'change str, &'change [u8]),
+    PutInternals(&'change [(&'change str, &'change [u8])]),
 }
 
 /// The decrypted vault: rules, values and internal records. Each change is written to disk
@@ -168,27 +168,36 @@ impl OpenVault {
         Ok(())
     }
 
+    /// Stores internal records together, in one write.
+    ///
     /// # Errors
     ///
     /// Fails when the write fails; the vault then stays unchanged.
-    pub fn set_internal(&mut self, key: &str, value: SecretSlice<u8>) -> Result<(), VaultError> {
-        self.persist(
-            &self.contents.rules,
-            RecordChange::PutInternal(key, value.expose_secret()),
-        )?;
-        crate::util::memory_lock::keep_in_memory(value.expose_secret());
-        self.contents.internal.insert(key.to_owned(), value);
+    pub fn set_internals(
+        &mut self,
+        records: Vec<(&str, SecretSlice<u8>)>,
+    ) -> Result<(), VaultError> {
+        let exposed: Vec<(&str, &[u8])> = records
+            .iter()
+            .map(|(key, value)| (*key, value.expose_secret()))
+            .collect();
+        self.persist(&self.contents.rules, RecordChange::PutInternals(&exposed))?;
+        drop(exposed);
+        for (key, value) in records {
+            crate::util::memory_lock::keep_in_memory(value.expose_secret());
+            self.contents.internal.insert(key.to_owned(), value);
+        }
         Ok(())
     }
 
     fn persist(&self, rules: &SecretRules, change: RecordChange<'_>) -> Result<(), VaultError> {
         let replaced_secret = match change {
             RecordChange::PutSecret(name, _) | RecordChange::DropSecret(name) => Some(name),
-            RecordChange::None | RecordChange::PutInternal(..) => None,
+            RecordChange::None | RecordChange::PutInternals(..) => None,
         };
-        let replaced_internal = match change {
-            RecordChange::PutInternal(key, _) => Some(key),
-            _ => None,
+        let replaced_internals: &[(&str, &[u8])] = match change {
+            RecordChange::PutInternals(records) => records,
+            _ => &[],
         };
         let secrets = self
             .contents
@@ -204,31 +213,38 @@ impl OpenVault {
             .contents
             .internal
             .iter()
-            .filter(move |(key, _)| Some(key.as_str()) != replaced_internal)
+            .filter(move |(key, _)| {
+                !replaced_internals
+                    .iter()
+                    .any(|(replaced, _)| *replaced == key.as_str())
+            })
             .map(|(key, value)| Record {
                 kind: RecordKind::Internal,
                 name: key,
                 value: value.expose_secret(),
             });
-        let added = match change {
+        let added_secret = match change {
             RecordChange::PutSecret(name, value) => Some(Record {
                 kind: RecordKind::Secret,
                 name: name.as_str(),
                 value,
             }),
-            RecordChange::PutInternal(key, value) => Some(Record {
-                kind: RecordKind::Internal,
-                name: key,
-                value,
-            }),
-            RecordChange::None | RecordChange::DropSecret(_) => None,
+            _ => None,
         };
+        let added_internals = replaced_internals.iter().map(|(key, value)| Record {
+            kind: RecordKind::Internal,
+            name: key,
+            value,
+        });
         let header = self.header.with_fresh_nonce()?;
         let bytes = format::seal(
             header,
             &self.key,
             rules,
-            secrets.chain(internal).chain(added),
+            secrets
+                .chain(internal)
+                .chain(added_secret)
+                .chain(added_internals),
         )?;
         file::write_atomically(&self.path, &bytes)
     }

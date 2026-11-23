@@ -25,7 +25,6 @@ use secrets_core::{RunTemplate, Scrubber};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
-pub use arguments::DIRECTORY_CHANGED_EXIT_CODE;
 pub use directory::CheckedDirectory;
 pub use error::SandboxError;
 pub use launcher::{Launcher, TEST_USER_RUNTIME_VARIABLE};
@@ -60,6 +59,8 @@ pub struct SandboxOutput {
     pub stderr: Vec<u8>,
     pub truncated: bool,
     pub timed_out: bool,
+    /// The working directory changed after the check; the command did not run.
+    pub cwd_changed: bool,
 }
 
 /// # Errors
@@ -71,9 +72,11 @@ pub async fn run_in_sandbox(request: SandboxRequest<'_>) -> Result<SandboxOutput
     if !launcher.bwrap.is_file() || !launcher.systemd_run.is_file() {
         return Err(SandboxError::SandboxMissing);
     }
+    let marker = launcher::random_hex()?;
     let options = arguments::bwrap_options(
         request.template,
         request.cwd.map(CheckedDirectory::path),
+        &marker,
         &request.environment,
     )?;
     let command_line = arguments::command_line(
@@ -102,7 +105,8 @@ pub async fn run_in_sandbox(request: SandboxRequest<'_>) -> Result<SandboxOutput
     drop(options);
     let limit = Duration::from_secs(u64::from(request.template.timeout_seconds));
     let max_output = usize::try_from(request.template.max_output_bytes).unwrap_or(usize::MAX);
-    let output = output::collect(&mut child, &request.scrubber, limit, max_output).await?;
+    let mut output = output::collect(&mut child, &request.scrubber, limit, max_output).await?;
+    output.cwd_changed = request.cwd.is_some() && output::take_marker(&mut output.stderr, &marker);
     if output.exit_code.is_none() {
         launcher::stop(launcher, &unit).await;
     }

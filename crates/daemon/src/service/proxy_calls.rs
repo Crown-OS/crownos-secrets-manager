@@ -1,6 +1,6 @@
 //! HTTPS proxy sessions: the agent gets a proxy URL and a CA to trust, never a key.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use secrecy::{ExposeSecret as _, SecretSlice};
@@ -97,8 +97,7 @@ impl SecretsService {
         if !scope_is_current {
             self.proxy = None;
             let authority = self.certificate_authority(&hosts, now)?;
-            std::fs::create_dir_all(&self.data_directory)
-                .and_then(|()| std::fs::write(self.ca_path(), authority.certificate_pem()))
+            write_replacing(&self.ca_path(), authority.certificate_pem().as_bytes())
                 .map_err(|error| ServiceError::Proxy(error.to_string()))?;
             let roots = self
                 .upstream_roots
@@ -147,12 +146,14 @@ impl SecretsService {
         let generated = CertificateAuthority::generate(&patterns)
             .map_err(|error| ServiceError::Proxy(error.to_string()))?;
         let scope = format!("{}\n{hosts}", generated.expires_at);
-        contents.set_internal(CA_KEY_RECORD, generated.key)?;
-        contents.set_internal(
-            CA_CERTIFICATE_RECORD,
-            SecretSlice::from(generated.certificate),
-        )?;
-        contents.set_internal(CA_SCOPE_RECORD, SecretSlice::from(scope.into_bytes()))?;
+        contents.set_internals(vec![
+            (CA_KEY_RECORD, generated.key),
+            (
+                CA_CERTIFICATE_RECORD,
+                SecretSlice::from(generated.certificate),
+            ),
+            (CA_SCOPE_RECORD, SecretSlice::from(scope.into_bytes())),
+        ])?;
         audit::proxy_authority_made(hosts);
         Ok(generated.authority)
     }
@@ -178,4 +179,19 @@ impl<'scope> CaScope<'scope> {
         let left = self.expires_at - crate::util::unix_time::unix_seconds_now_signed();
         self.hosts == hosts && left > CA_RENEW_BEFORE_SECONDS
     }
+}
+
+/// Writes a temporary file next to `path` and renames it over `path`, so an agent never reads a
+/// half-written certificate.
+fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let directory = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(directory)?;
+    let temporary = directory.join(format!(".{CA_FILE_NAME}.{}.tmp", std::process::id()));
+    let written = std::fs::write(&temporary, bytes)
+        .and_then(|()| std::fs::File::open(&temporary)?.sync_all())
+        .and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
 }

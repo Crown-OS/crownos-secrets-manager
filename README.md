@@ -204,8 +204,8 @@ The proxy works like this:
    It checks the real host against the system CA store.
 3. Each request must name the tunnel host: an absolute URI or a `Host` header for another host
    (a second virtual host on the same server, for example) gets 403. The path must be canonical:
-   no empty segment, no segment that starts with `.` or holds `;`, and no `%2e`, `%2f`, `%5c` or
-   `%25`.
+   no empty segment, no segment that starts with `.` (except a first segment `.well-known`) or
+   holds `;`, and no `%2e`, `%2f`, `%5c` or `%25`.
 4. It adds the bound header (for example `Authorization: Bearer <value>`) only when the host, the
    method and the path match the binding. A value goes nowhere else: there are no placeholders.
    A request with a key loses its `Range`, `If-Range` and `Accept-Charset` headers, and a `206`
@@ -224,9 +224,13 @@ The CA key is made at the first session. It lives only in the vault (as an inter
 memory. Only the certificate goes to disk. The CA:
 
 - is valid for one year, and is made again at a session when less than 30 days are left
-- has name constraints that permit only the bound hosts (for `*.example.com`, the subtree
-  `example.com`; for an IP address, that address). A pattern such as `*` permits every name, so
-  then the CA has no constraints.
+- has name constraints that permit only the bound hosts: an exact host and its subdomains, the
+  names under the part after the last `*` of a pattern (`*.example.com` permits
+  `api.example.com`, not `example.com`), or a single IP address. When no IP host is bound, every
+  IP address is excluded; when no DNS host is bound, every DNS name. A binding host that ends in
+  `*` is refused.
+- goes into the vault in one write with its key and scope, and its certificate file is replaced
+  through a temporary file and a rename
 - is made again when the set of bound hosts changes, so its constraints follow the bindings
 - has the key usages `keyCertSign` and `cRLSign` only, and a path length of 0
 - signs leaf certificates that are valid for 24 hours
@@ -251,10 +255,11 @@ daemon refuses:
   argument that starts with `-` is refused unless `allow_option_arguments` is set, so a caller
   cannot add an option such as `--output` or `--upload-file`.
 - a working directory that does not match `cwd_glob`, or that is inside the daemon's data
-  directory or a runtime directory. The check uses the canonical path, so `..` and symbolic
+  directory or a runtime directory, or that holds one of them. The check uses the canonical path, so `..` and symbolic
   links cannot leave the pattern. The daemon also notes the device and inode of the directory;
   the shell in the sandbox compares them again and stops the run (`CwdChanged`) when the
-  directory was swapped after the check. Without a `cwd_glob`, the command runs in an empty
+  directory was swapped after the check. It reports that with a random marker that the command
+  never sees, so a command cannot fake the report. Without a `cwd_glob`, the command runs in an empty
   `/tmp` and the caller gives no directory.
 - a fourth run while three go on (`TooManyRuns`)
 - any run when `bwrap` or `systemd-run` is not installed (`SandboxMissing`)

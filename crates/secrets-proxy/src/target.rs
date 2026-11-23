@@ -53,7 +53,8 @@ fn host_header_for(authority: &str) -> String {
     }
 }
 
-/// Each segment non-empty (except a final one), not starting with `.`, without `;`, and no
+/// Each segment non-empty (except a final one), not starting with `.` (but a first segment of
+/// `.well-known` passes), without `;`, and no
 /// percent-encoded `.`, `/`, `\` or `%`, so a binding for `/v1/*` cannot reach `/v1/../admin`
 /// or `/v1/..;/admin` in any spelling that a host might decode.
 fn is_canonical_path(path: &str) -> bool {
@@ -64,7 +65,10 @@ fn is_canonical_path(path: &str) -> bool {
     let segments: Vec<&str> = path.split('/').skip(1).collect();
     let last = segments.len().saturating_sub(1);
     let bad_segment = segments.iter().enumerate().any(|(index, segment)| {
-        segment.starts_with('.') || segment.contains(';') || (segment.is_empty() && index != last)
+        let well_known = index == 0 && *segment == ".well-known";
+        (segment.starts_with('.') && !well_known)
+            || segment.contains(';')
+            || (segment.is_empty() && index != last)
     });
     path.starts_with('/') && !encoded_separator && !path.contains('\\') && !bad_segment
 }
@@ -76,7 +80,13 @@ mod tests {
 
     #[test]
     fn only_canonical_paths_pass() {
-        for good in ["/", "/v1/echo", "/v1/echo/", "/repos/a/b"] {
+        for good in [
+            "/",
+            "/v1/echo",
+            "/v1/echo/",
+            "/repos/a/b",
+            "/.well-known/openid-configuration",
+        ] {
             assert!(is_canonical_path(good), "{good}");
         }
         for bad in [

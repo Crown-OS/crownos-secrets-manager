@@ -87,5 +87,19 @@ pub(crate) async fn collect(
         stderr: stderr.finish(),
         truncated,
         timed_out,
+        cwd_changed: false,
     })
+}
+
+/// Removes the line with `marker` from `stderr`; returns whether it was there.
+pub(crate) fn take_marker(stderr: &mut Vec<u8>, marker: &str) -> bool {
+    let line = format!("{marker}\n");
+    let Some(start) = stderr
+        .windows(line.len())
+        .position(|window| window == line.as_bytes())
+    else {
+        return false;
+    };
+    stderr.drain(start..start + line.len());
+    true
 }

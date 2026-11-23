@@ -70,12 +70,16 @@ impl Launcher {
     }
 }
 
+/// 16 random bytes as hex.
+pub(crate) fn random_hex() -> Result<String, SandboxError> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| SandboxError::Random)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// A fresh unit name, so a stop reaches only this run.
 pub(crate) fn unit_name() -> Result<String, SandboxError> {
-    let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes).map_err(|_| SandboxError::Random)?;
-    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!("crownos-secrets-run-{suffix}.service"))
+    Ok(format!("crownos-secrets-run-{}.service", random_hex()?))
 }
 
 /// `systemd-run` and its arguments up to the bwrap command line. No value is here: values go

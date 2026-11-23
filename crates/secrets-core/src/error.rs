@@ -11,7 +11,9 @@ pub enum CoreError {
     EmptyAgent,
     #[error("a target pattern in a binding is empty")]
     EmptyTarget,
-    #[error("an HTTP binding needs a host, a header name and a format that contains {{value}}")]
+    #[error(
+        "an HTTP binding needs a host that does not end in *, a header name and a format that contains {{value}}"
+    )]
     InvalidHttpBinding,
     #[error(
         "a run template needs a command, at least one secret, a timeout of 1 to 600 seconds and an output limit of 1 to 524288 bytes"
