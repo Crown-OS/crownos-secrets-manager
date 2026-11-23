@@ -327,6 +327,21 @@ async fn the_compositor_gets_one_request_per_typing_and_only_for_a_bound_window(
     assert_eq!(login_request.values[1], (b"hunter2-planted".to_vec(), 1, 0));
     assert_eq!(login_request.secret_names, "user, pass");
 
+    let note_as_password = type_secrets(
+        &mut service,
+        &[name("user"), name("user")],
+        &browser,
+        TypingShape::Login,
+    )
+    .await;
+    assert_eq!(note_as_password, UseOutcome::Done);
+    let note_request = typed.lock().unwrap()[3].clone();
+    assert_eq!(
+        note_request.values[1].1, 1,
+        "the second login value is a password"
+    );
+    assert_eq!(note_request.require_password_field, 1);
+
     outcomes.lock().unwrap().push_back(Outcome::TimedOut);
     let timed_out =
         type_secrets(&mut service, &[name("pass")], &browser, TypingShape::Single).await;

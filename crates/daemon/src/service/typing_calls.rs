@@ -105,12 +105,13 @@ impl SecretsService {
                 return Ok(TypingStart::Refused(UseOutcome::Denied));
             }
             let is_login_user = shape == TypingShape::Login && index == 0;
+            let is_login_password = shape == TypingShape::Login && index == 1;
             let is_secret_kind = matches!(
                 entry.kind,
                 SecretKind::Password | SecretKind::ApiKey | SecretKind::Token
             );
-            let password =
-                !is_login_user && (is_secret_kind || entry.binding.require_password_field);
+            let password = is_login_password
+                || (!is_login_user && (is_secret_kind || entry.binding.require_password_field));
             require_password_field |= password;
             values.push(TypingValue {
                 value: SecretSlice::from(value.expose_secret().to_vec()),
