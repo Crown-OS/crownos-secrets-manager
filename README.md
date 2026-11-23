@@ -74,7 +74,8 @@ The agent gets these tools:
 | `secrets_http_session` | Adds API keys to HTTPS requests through a proxy (S2; not available yet) |
 
 There is no `get` tool. Each tool description tells the model that no value comes back. The
-tool names use `_`, not `.`, because the Anthropic API refuses a tool name with a dot.
+tool names use `_`, not `.`, because some clients and model APIs do not accept a dot in a tool
+name.
 
 ## The rules file
 
@@ -190,10 +191,12 @@ The secrets manager does not stop these:
 - Code that runs as your user and searches on purpose. Examples: it reads the memory of a command
   child through `/proc/<pid>/environ` (S3), or it reads a filled field back. The Playwright MCP
   server from crownos-setup can read `input.value`.
-- An agent with a shell. It can run `crownos-secrets bind` itself, or edit `secrets.ron`, because
-  the admin check uses the executable path only. `add`, `remove` and `bind` need an unlocked vault,
-  and the CLI reads the master password only from a terminal. This makes the attack harder, but it
-  does not stop it.
+- An agent that can write files. The daemon reads `secrets.ron` again for each call, so a direct
+  edit can change `agents`, `confirm`, `rate_limit` and `admin_executables`. A file-write tool is
+  enough; a shell is not necessary. The admin check also uses the executable path only, so an
+  agent with a shell can run `crownos-secrets bind` itself. For the CLI path only, `add`, `remove`
+  and `bind` need an unlocked vault, and the CLI reads the master password only from a terminal.
+  A later milestone must protect the rules, for example in the vault or with a MAC.
 - Root, the kernel, or a person at the unlocked computer.
 - Values on disk in a hibernation image.
 

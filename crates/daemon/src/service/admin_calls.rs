@@ -6,25 +6,27 @@ use std::time::Instant;
 use secrecy::{ExposeSecret as _, SecretSlice};
 use secrets_core::config::SecretEntry;
 use secrets_core::{Binding, SecretKind, SecretName};
+use secrets_protocol::transfer::TransferError;
 
 use super::{SecretsService, ServiceError};
 use crate::{Caller, ConfigStore, audit};
 
 impl<Store: ConfigStore> SecretsService<Store> {
     /// Stores a value and names the secret in `secrets.ron`. A new secret gets an empty binding.
+    /// `read_value` runs only after the admin check.
     ///
     /// # Errors
     ///
-    /// Fails for a caller that is not an admin, a locked vault, or a write error.
+    /// Fails for a caller that is not an admin, a locked vault, or a read or write error.
     pub fn add(
         &mut self,
         caller: &Caller,
         name: &SecretName,
         kind: SecretKind,
-        value: SecretSlice<u8>,
+        read_value: impl FnOnce() -> Result<SecretSlice<u8>, TransferError>,
         now: Instant,
     ) -> Result<(), ServiceError> {
-        let result = self.add_checked(caller, name, kind, value, now);
+        let result = self.add_checked(caller, name, kind, read_value, now);
         audit::admin_call(caller, "add", Some(name), result_name(&result));
         result
     }
@@ -34,14 +36,16 @@ impl<Store: ConfigStore> SecretsService<Store> {
         caller: &Caller,
         name: &SecretName,
         kind: SecretKind,
-        value: SecretSlice<u8>,
+        read_value: impl FnOnce() -> Result<SecretSlice<u8>, TransferError>,
         now: Instant,
     ) -> Result<(), ServiceError> {
         self.require_admin(caller)?;
+        let contents = self.vault.contents_mut(now)?;
+        let value = read_value()?;
         if value.expose_secret().is_empty() {
-            return Err(secrets_protocol::transfer::TransferError::Empty.into());
+            return Err(TransferError::Empty.into());
         }
-        self.vault.contents_mut(now)?.insert(name.clone(), value)?;
+        contents.insert(name.clone(), value)?;
         let entry = self
             .config
             .secrets
@@ -135,17 +139,18 @@ impl<Store: ConfigStore> SecretsService<Store> {
     }
 
     /// Unlocks the vault, or creates it with this password when no vault exists.
+    /// `read_password` runs only after the admin check.
     ///
     /// # Errors
     ///
-    /// Fails for a caller that is not an admin or a wrong password.
+    /// Fails for a caller that is not an admin, a read error or a wrong password.
     pub fn unlock(
         &mut self,
         caller: &Caller,
-        password: &SecretSlice<u8>,
+        read_password: impl FnOnce() -> Result<SecretSlice<u8>, TransferError>,
         now: Instant,
     ) -> Result<(), ServiceError> {
-        let result = self.unlock_checked(caller, password, now);
+        let result = self.unlock_checked(caller, read_password, now);
         audit::admin_call(caller, "unlock", None, result_name(&result));
         result
     }
@@ -153,11 +158,11 @@ impl<Store: ConfigStore> SecretsService<Store> {
     fn unlock_checked(
         &mut self,
         caller: &Caller,
-        password: &SecretSlice<u8>,
+        read_password: impl FnOnce() -> Result<SecretSlice<u8>, TransferError>,
         now: Instant,
     ) -> Result<(), ServiceError> {
         self.require_admin(caller)?;
-        self.reload_config();
+        let password = read_password()?;
         self.vault.unlock(password.expose_secret(), now)?;
         Ok(())
     }

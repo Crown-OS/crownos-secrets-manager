@@ -141,9 +141,14 @@ impl<Store: ConfigStore> Handler for PeerRequests<'_, Store> {
         kind: SecretKind,
         value: OwnedFd,
     ) -> Result<(), RemoteError> {
-        let value = read_value(&value).map_err(ServiceError::from)?;
         self.service
-            .add(self.caller, &name, kind, value, Instant::now())
+            .add(
+                self.caller,
+                &name,
+                kind,
+                || read_value(&value),
+                Instant::now(),
+            )
             .map_err(Into::into)
     }
 
@@ -164,9 +169,8 @@ impl<Store: ConfigStore> Handler for PeerRequests<'_, Store> {
     }
 
     fn unlock(&mut self, master_password: OwnedFd) -> Result<(), RemoteError> {
-        let password = read_value(&master_password).map_err(ServiceError::from)?;
         self.service
-            .unlock(self.caller, &password, Instant::now())
+            .unlock(self.caller, || read_value(&master_password), Instant::now())
             .map_err(Into::into)
     }
 }
