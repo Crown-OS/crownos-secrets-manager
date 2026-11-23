@@ -104,10 +104,15 @@ The default binding allows nothing. An agent can use a secret only when `agents`
 
 Not all rules apply yet:
 
-- The confirmation on screen arrives in S4. Until then the daemon refuses every use with
-  `NeedsConfirmation` unless the confirmation of the secret is `Never`: `confirm: Some(Never)` in
-  the binding (`crownos-secrets bind <name> --confirm never`), or no `confirm` and a
-  `default_confirm` of `Never`. The default is `EveryUse`, so a new binding allows nothing yet.
+- `confirm` asks you on screen before a use. `EveryUse` asks each time; `PerSession(minutes)`
+  remembers your Allow for that agent (its app key) and secret for the minutes, in memory only;
+  `Never` does not ask. The dialog is the desktop portal's Access dialog in its dangerous style:
+  "Allow <agent> to use the secret “<name>”?", with the target (the template, the proxy hosts, or
+  the window, app and origin) and the app key. The agent's name comes from its app key, never
+  from the agent. No answer in 120 seconds is a deny. After a deny, the same agent gets no new
+  dialog for 60 seconds, and while one dialog of an agent is open, its other uses are refused.
+  Without a reachable portal, the use is refused with `NeedsConfirmation`. The request loop
+  answers other callers while a dialog is open.
 - `targets` and `require_password_field` apply from S4 (typing through the compositor).
 - `uses_per_minute` counts calls (`run`, `proxy_session` and the others), not the requests that
   go through one proxy session.

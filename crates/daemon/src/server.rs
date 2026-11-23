@@ -15,13 +15,14 @@ use secrets_core::{
 use secrets_protocol::secrets::{self, PeerHandler};
 use secrets_protocol::transfer::read_value;
 use secrets_protocol::{
-    ProxySessionReply, RequestId, RunReply, SecretMeta, TemplateMeta, VaultStatus,
+    ProxySessionReply, RequestId, RunReply, SecretMeta, TemplateMeta, TypingTarget, VaultStatus,
 };
 
 use crate::util::caller_text::sanitized;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
-use crate::service::RunStart;
+use crate::confirmation::{DialogRequest, Verdict};
+use crate::service::{Confirmation, RunStart};
 use crate::{Caller, IdentifyCaller, SecretsService};
 
 const LOCK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
@@ -30,10 +31,18 @@ const MAX_WINDOW_CHARACTERS: usize = 128;
 /// What the rest of the daemon sends to the request loop.
 enum Outgoing {
     LockCheck,
-    RunFinished {
+    /// The encoded reply of a request that a task finished.
+    Reply {
         peer: PeerId,
         request: u32,
-        reply: Result<RunReply, RemoteError>,
+        reply: Result<Vec<u8>, RemoteError>,
+    },
+    /// The user answered the dialog for this message, which now goes through dispatch again.
+    Answered {
+        peer: PeerId,
+        message: Message,
+        request: DialogRequest,
+        verdict: Verdict,
     },
 }
 
@@ -96,20 +105,64 @@ pub async fn serve<Identity: IdentifyCaller>(
                 .poll_tick(context)
                 .map(|_| Some(Outgoing::LockCheck)),
         },
-        |server, outgoing| match outgoing {
-            Outgoing::LockCheck => {
-                if let Ok(mut service) = service.try_borrow_mut() {
-                    service.lock_if_expired(Instant::now());
+        |server, outgoing| {
+            let Ok(mut service) = service.try_borrow_mut() else {
+                return;
+            };
+            match outgoing {
+                Outgoing::LockCheck => service.lock_if_expired(Instant::now()),
+                Outgoing::Reply {
+                    peer,
+                    request,
+                    reply,
+                } => send_encoded_reply(server, peer, request, reply),
+                Outgoing::Answered {
+                    peer,
+                    message,
+                    request,
+                    verdict,
+                } => {
+                    service.dialog_answered(&request, verdict, Instant::now());
+                    if let Err(error) = dispatch(
+                        &mut service,
+                        &identity,
+                        server,
+                        peer,
+                        message,
+                        &finished_runs,
+                    ) {
+                        tracing::warn!(%error, "cannot answer a request after its dialog");
+                    }
                 }
             }
-            Outgoing::RunFinished {
-                peer,
-                request,
-                reply,
-            } => send_reply(server, peer, request, &reply),
         },
     )
     .await
+}
+
+fn send_encoded_reply(
+    server: &mut Server,
+    peer: PeerId,
+    request: u32,
+    reply: Result<Vec<u8>, RemoteError>,
+) {
+    let sent = match reply {
+        Ok(payload) => server.reply(peer, request, &payload, Vec::new()),
+        Err(error) => server.reply_err(peer, request, &error),
+    };
+    if let Err(error) = sent {
+        tracing::debug!(%error, "cannot send a reply; the caller may have gone");
+    }
+}
+
+/// The encoded form of a reply for [`Outgoing::Reply`].
+fn encoded<Reply: serde::Serialize>(
+    reply: Result<Reply, RemoteError>,
+) -> Result<Vec<u8>, RemoteError> {
+    reply.and_then(|reply| {
+        crownos_ipc::postcard::to_stdvec(&reply)
+            .map_err(|_| RemoteError::handler("reply encoding failed"))
+    })
 }
 
 fn send_reply<Reply: serde::Serialize>(
@@ -147,21 +200,133 @@ fn dispatch<Identity: IdentifyCaller>(
         .map_or_else(Caller::unidentified, |credentials| {
             identity.identify(credentials)
         });
-    if message.kind == Kind::Request && message.selector == <secrets::run as MethodMsg>::SELECTOR {
-        start_run(service, &caller, server, peer, &message, finished_runs);
-    } else {
-        let mut requests = PeerRequests {
-            service: &mut *service,
-            identity,
-        };
-        secrets::dispatch_with_peer(&mut requests, server, peer, message)?;
+    if message.kind == Kind::Request
+        && let Some((names, target)) = use_request(service, &message)
+    {
+        match service.confirmation_for(&caller, &names, &target, Instant::now()) {
+            Confirmation::Ask(request) => {
+                ask_first(service, peer, message, request, finished_runs);
+                return Ok(());
+            }
+            Confirmation::Refuse => service.decide_denied(&caller, &names),
+            Confirmation::NotNeeded => {}
+        }
     }
+    let dispatched = dispatch_now(
+        service,
+        identity,
+        &caller,
+        server,
+        peer,
+        message,
+        finished_runs,
+    );
+    service.forget_decision();
     for event in service.take_events() {
         if let Err(error) = server.emit(&event) {
             tracing::debug!(%error, "cannot send a Used event");
         }
     }
-    Ok(())
+    dispatched
+}
+
+/// Opens the dialog in a task; the answer comes back as [`Outgoing::Answered`].
+fn ask_first(
+    service: &mut SecretsService,
+    peer: PeerId,
+    message: Message,
+    request: DialogRequest,
+    outgoing: &UnboundedSender<Outgoing>,
+) {
+    service.dialog_opened(&request);
+    let asker = service.confirmation_asker();
+    let outgoing = outgoing.clone();
+    tokio::spawn(async move {
+        let verdict = asker.ask(request.clone()).await;
+        let _ = outgoing.send(Outgoing::Answered {
+            peer,
+            message,
+            request,
+            verdict,
+        });
+    });
+}
+
+/// The secrets that a request wants to use, and a text for the dialog, or `None` for a request
+/// that uses no secret.
+fn use_request(
+    service: &mut SecretsService,
+    message: &Message,
+) -> Option<(Vec<SecretName>, String)> {
+    let payload = &message.payload;
+    let decode_failed = |_| ();
+    match message.selector {
+        selector if selector == <secrets::type_into as MethodMsg>::SELECTOR => {
+            let request: secrets::type_into = crownos_ipc::postcard::from_bytes(payload)
+                .map_err(decode_failed)
+                .ok()?;
+            Some((vec![request.name], typing_target_text(&request.target)))
+        }
+        selector if selector == <secrets::fill_login as MethodMsg>::SELECTOR => {
+            let request: secrets::fill_login = crownos_ipc::postcard::from_bytes(payload)
+                .map_err(decode_failed)
+                .ok()?;
+            Some((
+                vec![request.username, request.password],
+                typing_target_text(&request.target),
+            ))
+        }
+        selector if selector == <secrets::run as MethodMsg>::SELECTOR => {
+            let request: secrets::run = crownos_ipc::postcard::from_bytes(payload)
+                .map_err(decode_failed)
+                .ok()?;
+            let names = service.template_secret_names(&request.template, Instant::now())?;
+            Some((
+                names,
+                format!("the command template “{}”", request.template),
+            ))
+        }
+        selector if selector == <secrets::proxy_session as MethodMsg>::SELECTOR => {
+            let request: secrets::proxy_session = crownos_ipc::postcard::from_bytes(payload)
+                .map_err(decode_failed)
+                .ok()?;
+            let hosts = service.proxy_hosts(&request.names, Instant::now());
+            Some((request.names, format!("HTTPS requests to {hosts}")))
+        }
+        _ => None,
+    }
+}
+
+fn typing_target_text(target: &TypingTarget) -> String {
+    let window = sanitized(&target.window, MAX_WINDOW_CHARACTERS);
+    let app_id = sanitized(&target.app_id, MAX_WINDOW_CHARACTERS);
+    match &target.origin {
+        Some(origin) => format!(
+            "typing into {app_id} (window {window}) at {}",
+            sanitized(origin, MAX_WINDOW_CHARACTERS)
+        ),
+        None => format!("typing into {app_id} (window {window})"),
+    }
+}
+
+fn dispatch_now<Identity: IdentifyCaller>(
+    service: &mut SecretsService,
+    identity: &Identity,
+    caller: &Caller,
+    server: &mut Server,
+    peer: PeerId,
+    message: Message,
+    finished_runs: &UnboundedSender<Outgoing>,
+) -> Result<(), crownos_ipc::Error> {
+    if message.kind == Kind::Request && message.selector == <secrets::run as MethodMsg>::SELECTOR {
+        start_run(service, caller, server, peer, &message, finished_runs);
+        return Ok(());
+    }
+    let mut requests = PeerRequests {
+        service: &mut *service,
+        identity,
+    };
+    secrets::dispatch_with_peer(&mut requests, server, peer, message)
 }
 
 /// Checks a run at once; a run that passes goes to a task, which answers when it ends.
@@ -192,10 +357,10 @@ fn start_run(
             let finished_runs = finished_runs.clone();
             tokio::spawn(async move {
                 let reply = job.execute().await.map_err(RemoteError::from);
-                let _ = finished_runs.send(Outgoing::RunFinished {
+                let _ = finished_runs.send(Outgoing::Reply {
                     peer,
                     request,
-                    reply,
+                    reply: encoded(reply),
                 });
             });
         }
@@ -205,10 +370,6 @@ fn start_run(
 struct PeerRequests<'request, Identity> {
     service: &'request mut SecretsService,
     identity: &'request Identity,
-}
-
-fn window_target(window: &str) -> String {
-    format!("window:{}", sanitized(window, MAX_WINDOW_CHARACTERS))
 }
 
 impl<Identity: IdentifyCaller> PeerHandler for PeerRequests<'_, Identity> {
@@ -251,13 +412,13 @@ impl<Identity: IdentifyCaller> PeerHandler for PeerRequests<'_, Identity> {
         &mut self,
         peer: crownos_ipc::Caller<'_>,
         name: SecretName,
-        window: String,
+        target: TypingTarget,
     ) -> Result<UseOutcome, RemoteError> {
         self.service
             .use_secrets(
                 &self.identity.identify(peer.credentials),
                 &[name],
-                &window_target(&window),
+                &typing_target_text(&target),
                 Instant::now(),
             )
             .map_err(Into::into)
@@ -266,15 +427,15 @@ impl<Identity: IdentifyCaller> PeerHandler for PeerRequests<'_, Identity> {
     fn fill_login(
         &mut self,
         peer: crownos_ipc::Caller<'_>,
-        _username: String,
+        username: SecretName,
         password: SecretName,
-        window: String,
+        target: TypingTarget,
     ) -> Result<UseOutcome, RemoteError> {
         self.service
             .use_secrets(
                 &self.identity.identify(peer.credentials),
-                &[password],
-                &window_target(&window),
+                &[username, password],
+                &typing_target_text(&target),
                 Instant::now(),
             )
             .map_err(Into::into)

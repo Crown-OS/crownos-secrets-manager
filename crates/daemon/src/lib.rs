@@ -4,6 +4,7 @@
 
 pub mod admin;
 mod audit;
+pub mod confirmation;
 pub mod hardening;
 pub mod identity;
 pub mod server;

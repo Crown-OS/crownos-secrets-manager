@@ -2,11 +2,12 @@
 
 mod admin_calls;
 mod agent_calls;
+mod confirmations;
 mod error;
 mod proxy_calls;
 mod run_calls;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,10 @@ use secrets_vault::Vault;
 
 use crate::Caller;
 use crate::admin::AdminPolicy;
+use crate::confirmation::{ConfirmationAsker, PortalAsker};
 use crate::util::rate::RateLimiter;
 
+pub use confirmations::Confirmation;
 pub use error::ServiceError;
 pub use run_calls::{RunJob, RunStart};
 
@@ -43,6 +46,11 @@ pub struct SecretsService {
     proxy_ca_hosts: Option<String>,
     next_session_id: u64,
     launcher: secrets_run::Launcher,
+    asker: std::sync::Arc<dyn ConfirmationAsker>,
+    decision: Option<confirmations::Decision>,
+    deny_cool_downs: HashMap<String, Instant>,
+    session_approvals: HashMap<(String, SecretName), Instant>,
+    open_dialogs: HashSet<String>,
     run_slots: std::sync::Arc<tokio::sync::Semaphore>,
     protected_directories: Vec<PathBuf>,
 }
@@ -74,6 +82,11 @@ impl SecretsService {
             proxy_ca_hosts: None,
             next_session_id: 1,
             launcher: secrets_run::Launcher::default(),
+            asker: std::sync::Arc::new(PortalAsker),
+            decision: None,
+            deny_cool_downs: HashMap::new(),
+            session_approvals: HashMap::new(),
+            open_dialogs: HashSet::new(),
             run_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(DEFAULT_CONCURRENT_RUNS)),
             protected_directories: run_calls::protected_directories(&data_directory),
             data_directory,
@@ -85,6 +98,17 @@ impl SecretsService {
     pub fn with_launcher(mut self, launcher: secrets_run::Launcher) -> Self {
         self.launcher = launcher;
         self
+    }
+
+    /// What shows the confirmation dialog; the desktop portal when not set.
+    #[must_use]
+    pub fn with_confirmation_asker(mut self, asker: std::sync::Arc<dyn ConfirmationAsker>) -> Self {
+        self.asker = asker;
+        self
+    }
+
+    pub(crate) fn confirmation_asker(&self) -> std::sync::Arc<dyn ConfirmationAsker> {
+        std::sync::Arc::clone(&self.asker)
     }
 
     /// How many runs may go on at the same time; 3 when not set.

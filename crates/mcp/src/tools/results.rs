@@ -47,6 +47,8 @@ pub(crate) fn use_result(outcome: UseOutcome) -> CallToolResult {
         UseOutcome::RateLimited => "slow down: too many uses this minute",
         UseOutcome::Locked => "the vault is locked; ask the user to run `crownos-secrets unlock`",
         UseOutcome::Unknown => "no stored secret or template has this name; see secrets_list",
+        UseOutcome::FocusChanged => "stopped: the focus left the window before typing",
+        UseOutcome::Cancelled => "stopped: the user or the compositor cancelled the typing",
         UseOutcome::NeedsConfirmation => {
             "refused: this secret needs a confirmation on screen, which is not available yet; the user can allow uses without one with `crownos-secrets bind <name> --confirm never`"
         }

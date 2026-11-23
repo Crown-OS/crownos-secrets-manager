@@ -19,7 +19,7 @@ use secrets_core::{
     Binding, Confirm, HttpBinding, RunTemplate, SecretKind, SecretName, TemplateName, UseOutcome,
 };
 use secrets_protocol::secrets::{self, Client, Event};
-use secrets_protocol::{ProxySessionReply, RunReply, error_code, transfer};
+use secrets_protocol::{ProxySessionReply, RunReply, TypingTarget, error_code, transfer};
 use secrets_run::Launcher;
 use secrets_vault::{KdfParams, Vault};
 use serde::de::DeserializeOwned;
@@ -160,6 +160,14 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+fn typing_target(window: &str) -> TypingTarget {
+    TypingTarget {
+        window: window.to_owned(),
+        app_id: "org.example.browser".to_owned(),
+        origin: None,
+    }
+}
+
 fn bound_to_this_test() -> Binding {
     Binding {
         agents: vec![format!("exe:{}", test_executable())],
@@ -212,8 +220,8 @@ fn no_reply_event_or_log_line_holds_a_value() {
         .unwrap_err();
     assert_eq!(missing.code, error_code::VAULT);
 
-    let locked_use =
-        recorder.call(|client| client.type_into(name("github_token"), "w1\n\u{1b}[31m".into()));
+    let locked_use = recorder
+        .call(|client| client.type_into(name("github_token"), typing_target("w1\n\u{1b}[31m")));
     assert_eq!(locked_use.unwrap(), UseOutcome::Locked);
 
     recorder
@@ -263,11 +271,11 @@ fn no_reply_event_or_log_line_holds_a_value() {
     assert_eq!(names, ["github_token", "unbound"]);
 
     let permitted = recorder
-        .call(|client| client.type_into(name("github_token"), "w1".into()))
+        .call(|client| client.type_into(name("github_token"), typing_target("w1")))
         .unwrap_err();
     assert_eq!(permitted.code, error_code::UNAVAILABLE);
-    let denied =
-        recorder.call(|client| client.fill_login("user".into(), name("unbound"), "w1".into()));
+    let denied = recorder
+        .call(|client| client.fill_login(name("unbound"), name("unbound"), typing_target("w1")));
     assert_eq!(denied.unwrap(), UseOutcome::Denied);
     let unknown = recorder.call(|client| client.proxy_session(vec![name("missing")], 5));
     assert_eq!(
@@ -328,7 +336,12 @@ fn no_reply_event_or_log_line_holds_a_value() {
     let outcomes: Vec<UseOutcome> = events.iter().map(|event| event.outcome).collect();
     assert_eq!(
         outcomes,
-        [UseOutcome::Locked, UseOutcome::Denied, UseOutcome::Unknown]
+        [
+            UseOutcome::Locked,
+            UseOutcome::Denied,
+            UseOutcome::Denied,
+            UseOutcome::Unknown
+        ]
     );
     assert!(events.iter().all(|event| !event.target.contains('\n')));
 

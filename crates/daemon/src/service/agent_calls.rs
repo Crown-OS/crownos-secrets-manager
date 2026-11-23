@@ -6,6 +6,7 @@ use secrets_core::{Confirm, SecretKind, SecretName, UseOutcome};
 use secrets_protocol::secrets::Used;
 use secrets_protocol::{RequestId, SecretMeta, SecretRequest, TemplateMeta, VaultStatus};
 
+use super::confirmations::ConfirmCheck;
 use super::{MAX_PENDING_REQUESTS, MAX_PENDING_REQUESTS_PER_CALLER, SecretsService, ServiceError};
 use crate::util::caller_text::sanitized;
 use crate::util::rate::RateDecision;
@@ -197,11 +198,19 @@ impl SecretsService {
             return UseCheck::Refused(UseOutcome::Unknown);
         }
         let default_confirm = rules.settings.default_confirm;
-        let needs_confirmation = entries
+        let confirms: Vec<Confirm> = entries
             .iter()
-            .any(|entry| entry.binding.confirm_or(default_confirm) != Confirm::Never);
-        if needs_confirmation {
-            return UseCheck::Refused(UseOutcome::NeedsConfirmation);
+            .map(|entry| entry.binding.confirm_or(default_confirm))
+            .collect();
+        let Some(app_key) = caller.app_key_text() else {
+            return UseCheck::Refused(UseOutcome::Denied);
+        };
+        match self.confirm_check(caller, &app_key, names, &confirms, "", now, true) {
+            ConfirmCheck::Passed => {}
+            ConfirmCheck::Denied => return UseCheck::Refused(UseOutcome::Denied),
+            ConfirmCheck::Unreachable | ConfirmCheck::Ask(_) => {
+                return UseCheck::Refused(UseOutcome::NeedsConfirmation);
+            }
         }
         UseCheck::Passed
     }
@@ -224,5 +233,7 @@ const fn outcome_name(outcome: UseOutcome) -> &'static str {
         UseOutcome::Locked => "locked",
         UseOutcome::Unknown => "unknown",
         UseOutcome::NeedsConfirmation => "needs-confirmation",
+        UseOutcome::FocusChanged => "focus-changed",
+        UseOutcome::Cancelled => "cancelled",
     }
 }

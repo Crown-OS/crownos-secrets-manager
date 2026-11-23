@@ -17,4 +17,8 @@ pub enum UseOutcome {
     /// The binding asks for a confirmation on screen, which this release cannot show yet. Only
     /// `confirm: Some(Never)` (or a default of `Never`) allows a use now.
     NeedsConfirmation,
+    /// The focus left the target window before the compositor typed.
+    FocusChanged,
+    /// The user or the compositor stopped the typing.
+    Cancelled,
 }

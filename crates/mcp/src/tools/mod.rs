@@ -11,7 +11,7 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use secrets_core::SecretKind;
-use secrets_protocol::secrets;
+use secrets_protocol::{TypingTarget, secrets};
 use serde_json::{Map, Value, json};
 
 use self::arguments::{
@@ -84,10 +84,19 @@ impl Bridge {
                 }))
             }
             "secrets_type" => {
-                let TypeArguments { name, window } = parse(arguments)?;
+                let TypeArguments {
+                    name,
+                    window,
+                    app_id,
+                    origin,
+                } = parse(arguments)?;
                 let arguments = secrets::type_into {
                     name: secret_name(name)?,
-                    window,
+                    target: TypingTarget {
+                        window,
+                        app_id,
+                        origin,
+                    },
                 };
                 use_result(
                     self.call::<secrets::type_into>(&arguments)
@@ -97,14 +106,20 @@ impl Bridge {
             }
             "secrets_fill_login" => {
                 let FillLoginArguments {
-                    username,
+                    username_secret,
                     password_secret,
                     window,
+                    app_id,
+                    origin,
                 } = parse(arguments)?;
                 let arguments = secrets::fill_login {
-                    username,
+                    username: secret_name(username_secret)?,
                     password: secret_name(password_secret)?,
-                    window,
+                    target: TypingTarget {
+                        window,
+                        app_id,
+                        origin,
+                    },
                 };
                 use_result(
                     self.call::<secrets::fill_login>(&arguments)

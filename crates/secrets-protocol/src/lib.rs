@@ -17,6 +17,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub u64);
 
+/// Where a typed secret goes. computer-use fills it from the focused element: the compositor
+/// window, its app id, and for a browser tab the page origin from the DevTools target URL. The
+/// origin is a hint; the compositor checks the window again before it types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypingTarget {
+    /// The `ext_foreign_toplevel` identifier of the window.
+    pub window: String,
+    pub app_id: String,
+    pub origin: Option<String>,
+}
+
 /// What a caller may know about a secret: everything but its value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretMeta {
@@ -104,11 +115,12 @@ crownos_ipc::protocol! {
         fn templates() -> Vec<TemplateMeta>;
         /// Asks the user to add a secret that the agent needs.
         fn request(name: SecretName, kind: SecretKind, purpose: String) -> RequestId;
-        /// Types the secret into a window. Not available yet: answers `UNAVAILABLE` after the
-        /// access checks.
-        fn type_into(name: SecretName, window: String) -> UseOutcome;
-        /// Fills a login form. Not available yet.
-        fn fill_login(username: String, password: SecretName, window: String) -> UseOutcome;
+        /// Types the secret into the focused field of the target window, through the compositor.
+        /// `UNAVAILABLE` when the compositor does not offer `crownos_secret_input_manager_v1`.
+        fn type_into(name: SecretName, target: TypingTarget) -> UseOutcome;
+        /// Types the user name secret, a Tab, then the password secret into a password field;
+        /// one confirmation covers both.
+        fn fill_login(username: SecretName, password: SecretName, target: TypingTarget) -> UseOutcome;
         /// Runs a registered template in a sandbox with secrets in its environment.
         fn run(template: TemplateName, arguments: Vec<String>, cwd: String) -> RunReply;
         /// Starts an HTTPS proxy session that adds the API keys to requests to their hosts.

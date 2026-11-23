@@ -55,24 +55,31 @@ pub(crate) fn tools() -> Vec<Tool> {
         ),
         tool(
             "secrets_type",
-            "Types a secret into the focused field of a window, after the user confirms. Not available yet. Never returns the value.",
+            "Types a secret into the focused field of a window, after the user confirms on screen. Prefer computer-use's type_secret, which focuses the field for you. Never returns the value.",
             json!({
                 "type": "object",
-                "properties": { "name": { "type": "string" }, "window": { "type": "string" } },
-                "required": ["name", "window"]
+                "properties": {
+                    "name": { "type": "string" },
+                    "window": { "type": "string", "description": "The window identifier." },
+                    "app_id": { "type": "string" },
+                    "origin": { "type": "string", "description": "The page origin in a browser, such as https://github.com." }
+                },
+                "required": ["name", "window", "app_id"]
             }),
         ),
         tool(
             "secrets_fill_login",
-            "Fills a login form with a user name and a stored password. Not available yet. Never returns the value.",
+            "Types a stored user name, Tab, and a stored password into a login form whose user name field has focus, after one confirmation on screen. Never returns the values.",
             json!({
                 "type": "object",
                 "properties": {
-                    "username": { "type": "string" },
+                    "username_secret": { "type": "string" },
                     "password_secret": { "type": "string" },
-                    "window": { "type": "string" }
+                    "window": { "type": "string" },
+                    "app_id": { "type": "string" },
+                    "origin": { "type": "string" }
                 },
-                "required": ["username", "password_secret", "window"]
+                "required": ["username_secret", "password_secret", "window", "app_id"]
             }),
         ),
         tool(
