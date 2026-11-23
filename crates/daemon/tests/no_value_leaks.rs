@@ -72,12 +72,13 @@ fn start_daemon(socket_directory: &Path, vault_path: PathBuf, admin: String, log
             .with_writer(move || log.clone())
             .finish();
         let _default = tracing::subscriber::set_default(subscriber);
+        let data_directory = vault_path.with_extension("data");
         let vault = Vault::new(vault_path).with_kdf_params(KdfParams {
             memory_kib: 64,
             iterations: 1,
             parallelism: 1,
         });
-        let service = SecretsService::new(vault, vec![admin]);
+        let service = SecretsService::new(vault, vec![admin], data_directory);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

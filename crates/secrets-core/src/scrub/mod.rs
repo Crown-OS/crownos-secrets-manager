@@ -126,7 +126,7 @@ impl Scrubber {
             .sort_by_key(|pattern| std::cmp::Reverse(pattern.bytes.len()));
     }
 
-    pub fn stream(&self) -> ScrubStream<'_> {
+    pub fn stream(&self) -> ScrubStream<&Self> {
         ScrubStream::new(self)
     }
 

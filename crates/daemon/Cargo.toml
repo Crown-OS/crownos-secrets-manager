@@ -14,15 +14,17 @@ path = "src/main.rs"
 [dependencies]
 secrets-core = { workspace = true }
 secrets-protocol = { workspace = true }
+secrets-proxy = { workspace = true }
 secrets-vault = { workspace = true }
 
 anyhow = { workspace = true }
+rustls = { workspace = true }
 crownos-ipc = { workspace = true, features = ["tokio"] }
 dirs = { workspace = true }
 rustix = { workspace = true }
 secrecy = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "signal", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "signal", "time", "process", "io-util"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

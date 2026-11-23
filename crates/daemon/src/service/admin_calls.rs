@@ -59,7 +59,10 @@ impl SecretsService {
     ///
     /// Fails for a caller that is not an admin.
     pub fn lock(&mut self, caller: &Caller) -> Result<(), ServiceError> {
-        let result = self.require_admin(caller).map(|()| self.vault.lock());
+        let result = self.require_admin(caller).map(|()| {
+            self.vault.lock();
+            self.proxy = None;
+        });
         audit::admin_call(caller, "lock", None, result_name(&result));
         result
     }

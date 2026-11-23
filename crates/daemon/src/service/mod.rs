@@ -3,13 +3,16 @@
 mod admin_calls;
 mod agent_calls;
 mod error;
+mod proxy_calls;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use secrets_core::{RateLimitPolicy, SecretName};
 use secrets_protocol::SecretRequest;
 use secrets_protocol::secrets::Used;
+use secrets_proxy::Proxy;
 use secrets_vault::Vault;
 
 use crate::Caller;
@@ -29,6 +32,10 @@ pub struct SecretsService {
     next_request_id: u64,
     last_used: HashMap<SecretName, u64>,
     events: Vec<Used>,
+    data_directory: PathBuf,
+    upstream_roots: Option<rustls::RootCertStore>,
+    proxy: Option<Proxy>,
+    next_session_id: u64,
 }
 
 impl std::fmt::Debug for SecretsService {
@@ -42,7 +49,8 @@ impl std::fmt::Debug for SecretsService {
 }
 
 impl SecretsService {
-    pub fn new(vault: Vault, admin_executables: Vec<String>) -> Self {
+    /// `data_directory` gets the CA certificate of the proxy, `secrets-ca.pem`.
+    pub fn new(vault: Vault, admin_executables: Vec<String>, data_directory: PathBuf) -> Self {
         Self {
             vault,
             admin_executables,
@@ -52,7 +60,18 @@ impl SecretsService {
             next_request_id: 1,
             last_used: HashMap::new(),
             events: Vec::new(),
+            data_directory,
+            upstream_roots: None,
+            proxy: None,
+            next_session_id: 1,
         }
+    }
+
+    /// The CAs that the proxy trusts for the real hosts; the system store when not set.
+    #[must_use]
+    pub fn with_upstream_roots(mut self, roots: rustls::RootCertStore) -> Self {
+        self.upstream_roots = Some(roots);
+        self
     }
 
     /// The `Used` events since the last call, for the server to send to subscribers.
@@ -60,9 +79,23 @@ impl SecretsService {
         std::mem::take(&mut self.events)
     }
 
+    /// Locks an expired vault. A locked vault also stops the proxy, which drops its sessions
+    /// with their values and the CA key.
     pub fn lock_if_expired(&mut self, now: Instant) {
         if self.vault.lock_if_expired(now) {
             crate::audit::locked_after_timeout();
+        }
+        if self.vault.locks_in(now).is_none() {
+            self.proxy = None;
+        } else if let Some(proxy) = &self.proxy {
+            proxy.forget_expired_sessions();
+        }
+    }
+
+    pub(crate) fn mark_used(&mut self, names: &[SecretName]) {
+        let now = crate::util::unix_time::unix_seconds_now();
+        for name in names {
+            self.last_used.insert(name.clone(), now);
         }
     }
 

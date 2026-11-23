@@ -1,15 +1,18 @@
+use std::ops::Deref;
+
 use zeroize::Zeroizing;
 
 use crate::Scrubber;
 
 /// Scrubs a stream that arrives in chunks. It holds back the last `longest match - 1` bytes of
-/// each chunk, because a value can start in one chunk and end in the next.
-pub struct ScrubStream<'scrubber> {
-    scrubber: &'scrubber Scrubber,
+/// each chunk, because a value can start in one chunk and end in the next. `Source` is a
+/// `&Scrubber` or a shared owner such as `Arc<Scrubber>`.
+pub struct ScrubStream<Source> {
+    scrubber: Source,
     held_back: Zeroizing<Vec<u8>>,
 }
 
-impl std::fmt::Debug for ScrubStream<'_> {
+impl<Source> std::fmt::Debug for ScrubStream<Source> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ScrubStream")
@@ -18,8 +21,8 @@ impl std::fmt::Debug for ScrubStream<'_> {
     }
 }
 
-impl<'scrubber> ScrubStream<'scrubber> {
-    pub(crate) fn new(scrubber: &'scrubber Scrubber) -> Self {
+impl<Source: Deref<Target = Scrubber>> ScrubStream<Source> {
+    pub fn new(scrubber: Source) -> Self {
         Self {
             scrubber,
             held_back: Zeroizing::new(Vec::new()),

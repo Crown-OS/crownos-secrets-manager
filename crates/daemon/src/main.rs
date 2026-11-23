@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
         .context("finding the data directory")?
         .join("crownos");
     let vault = Vault::new(data_directory.join("secrets.vault"));
-    let service = SecretsService::new(vault, admin::admin_executables());
+    let service = SecretsService::new(vault, admin::admin_executables(), data_directory);
     let mut server = ServiceBuilder::new(secrets::SERVICE)
         .build()
         .context("binding the secrets socket")?;

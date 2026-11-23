@@ -44,7 +44,8 @@ fn service(vault_path: &Path, now: Instant, settings: VaultSettings) -> SecretsS
         iterations: 1,
         parallelism: 1,
     });
-    let mut service = SecretsService::new(vault, vec![ADMIN.into()]);
+    let mut service =
+        SecretsService::new(vault, vec![ADMIN.into()], vault_path.with_extension("data"));
     service.init(&admin(), bytes(PASSWORD), now).unwrap();
     service
         .configure(&admin(), settings, bytes(PASSWORD), now)

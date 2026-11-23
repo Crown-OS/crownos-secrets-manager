@@ -162,19 +162,15 @@ impl Handler for PeerRequests<'_> {
     fn proxy_session(
         &mut self,
         names: Vec<SecretName>,
-        _ttl_minutes: u32,
+        ttl_minutes: u32,
     ) -> Result<ProxySessionReply, RemoteError> {
-        match self
-            .service
-            .use_secrets(self.caller, &names, "http-session", Instant::now())
-        {
-            Ok(outcome) => Ok(ProxySessionReply::Refused(outcome)),
-            Err(error) => Err(error.into()),
-        }
+        self.service
+            .proxy_session(self.caller, &names, ttl_minutes, Instant::now())
+            .map_err(Into::into)
     }
 
-    fn revoke_session(&mut self, _session: u64) -> Result<bool, RemoteError> {
-        Ok(false)
+    fn revoke_session(&mut self, session: u64) -> Result<bool, RemoteError> {
+        Ok(self.service.revoke_session(self.caller, session))
     }
 
     fn init(&mut self, master_password: OwnedFd) -> Result<(), RemoteError> {
