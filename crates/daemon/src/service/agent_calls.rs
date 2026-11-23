@@ -6,7 +6,7 @@ use secrets_core::{Confirm, SecretKind, SecretName, UseOutcome};
 use secrets_protocol::secrets::Used;
 use secrets_protocol::{RequestId, SecretMeta, SecretRequest, TemplateMeta, VaultStatus};
 
-use super::confirmations::ConfirmCheck;
+use super::confirmations::{ConfirmCheck, ConfirmQuery};
 use super::{MAX_PENDING_REQUESTS, MAX_PENDING_REQUESTS_PER_CALLER, SecretsService, ServiceError};
 use crate::util::caller_text::sanitized;
 use crate::util::rate::RateDecision;
@@ -126,9 +126,10 @@ impl SecretsService {
         names: &[SecretName],
         target: &str,
         now: Instant,
+        confirmed_by: ConfirmedBy,
     ) -> Option<UseOutcome> {
         self.lock_if_expired(now);
-        let outcome = match self.check_use(caller, names, now) {
+        let outcome = match self.check_use(caller, names, now, confirmed_by) {
             UseCheck::Passed => return None,
             UseCheck::RefusedQuietly(outcome) => return Some(outcome),
             UseCheck::Refused(outcome) => outcome,
@@ -155,7 +156,7 @@ impl SecretsService {
         target: &str,
         now: Instant,
     ) -> Result<UseOutcome, ServiceError> {
-        match self.refusal_for_use(caller, names, target, now) {
+        match self.refusal_for_use(caller, names, target, now, ConfirmedBy::Portal) {
             Some(outcome) => Ok(outcome),
             None => {
                 audit::use_decided(caller, names, target, "unavailable");
@@ -164,7 +165,13 @@ impl SecretsService {
         }
     }
 
-    fn check_use(&mut self, caller: &Caller, names: &[SecretName], now: Instant) -> UseCheck {
+    fn check_use(
+        &mut self,
+        caller: &Caller,
+        names: &[SecretName],
+        now: Instant,
+        confirmed_by: ConfirmedBy,
+    ) -> UseCheck {
         let allowed = self.rate_limit_policy(now).uses_per_minute;
         if let RateDecision::Refused { first } =
             self.use_limiter.decide(&caller.to_string(), allowed, now)
@@ -205,7 +212,19 @@ impl SecretsService {
         let Some(app_key) = caller.app_key_text() else {
             return UseCheck::Refused(UseOutcome::Denied);
         };
-        match self.confirm_check(caller, &app_key, names, &confirms, "", now, true) {
+        if confirmed_by == ConfirmedBy::Compositor {
+            return UseCheck::Passed;
+        }
+        let query = ConfirmQuery {
+            caller,
+            app_key: &app_key,
+            names,
+            confirms: &confirms,
+            target: "",
+            now,
+            consume: true,
+        };
+        match self.confirm_check(&query) {
             ConfirmCheck::Passed => {}
             ConfirmCheck::Denied => return UseCheck::Refused(UseOutcome::Denied),
             ConfirmCheck::Unreachable | ConfirmCheck::Ask(_) => {
@@ -235,5 +254,19 @@ const fn outcome_name(outcome: UseOutcome) -> &'static str {
         UseOutcome::NeedsConfirmation => "needs-confirmation",
         UseOutcome::FocusChanged => "focus-changed",
         UseOutcome::Cancelled => "cancelled",
+        UseOutcome::UnknownWindow => "unknown-window",
+        UseOutcome::TimedOut => "timed-out",
+        UseOutcome::TargetMismatch => "target-mismatch",
+        UseOutcome::SessionLocked => "session-locked",
     }
+}
+
+/// Who asks the user before a use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmedBy {
+    /// The portal dialog of the daemon, by the binding's `confirm`: runs and proxy sessions.
+    Portal,
+    /// The compositor's own dialog, always: typing. The binding's `confirm` and any session
+    /// approval do not apply.
+    Compositor,
 }

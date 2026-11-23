@@ -29,6 +29,18 @@ pub enum Confirmation {
     Refuse,
 }
 
+/// One question to [`SecretsService::confirm_check`].
+#[derive(Clone, Copy)]
+pub(crate) struct ConfirmQuery<'query> {
+    pub(crate) caller: &'query Caller,
+    pub(crate) app_key: &'query str,
+    pub(crate) names: &'query [SecretName],
+    pub(crate) confirms: &'query [Confirm],
+    pub(crate) target: &'query str,
+    pub(crate) now: Instant,
+    pub(crate) consume: bool,
+}
+
 /// What the confirmation part of a check says.
 pub(crate) enum ConfirmCheck {
     Passed,
@@ -68,7 +80,16 @@ impl SecretsService {
         if names.is_empty() {
             return Confirmation::NotNeeded;
         }
-        match self.confirm_check(caller, &app_key, names, &confirms, target, now, false) {
+        let query = ConfirmQuery {
+            caller,
+            app_key: &app_key,
+            names,
+            confirms: &confirms,
+            target,
+            now,
+            consume: false,
+        };
+        match self.confirm_check(&query) {
             ConfirmCheck::Ask(request) if self.open_dialogs.contains(&app_key) => {
                 drop(request);
                 Confirmation::Refuse
@@ -81,17 +102,16 @@ impl SecretsService {
 
     /// The confirmation part of a check. With `consume`, a decision for this request is used
     /// up.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn confirm_check(
-        &mut self,
-        caller: &Caller,
-        app_key: &str,
-        names: &[SecretName],
-        confirms: &[Confirm],
-        target: &str,
-        now: Instant,
-        consume: bool,
-    ) -> ConfirmCheck {
+    pub(crate) fn confirm_check(&mut self, query: &ConfirmQuery<'_>) -> ConfirmCheck {
+        let ConfirmQuery {
+            caller,
+            app_key,
+            names,
+            confirms,
+            target,
+            now,
+            consume,
+        } = *query;
         if confirms.iter().all(|confirm| *confirm == Confirm::Never) {
             return ConfirmCheck::Passed;
         }

@@ -8,6 +8,7 @@ use secrets_core::SecretName;
 use secrets_protocol::{ProxySession, ProxySessionReply};
 use secrets_proxy::{CertificateAuthority, Proxy, SessionSecret};
 
+use super::agent_calls::ConfirmedBy;
 use super::{SecretsService, ServiceError};
 use crate::{Caller, audit};
 
@@ -32,7 +33,9 @@ impl SecretsService {
         ttl_minutes: u32,
         now: Instant,
     ) -> Result<ProxySessionReply, ServiceError> {
-        if let Some(outcome) = self.refusal_for_use(caller, names, "http-session", now) {
+        if let Some(outcome) =
+            self.refusal_for_use(caller, names, "http-session", now, ConfirmedBy::Portal)
+        {
             return Ok(ProxySessionReply::Refused(outcome));
         }
         let contents = self.vault.contents(now)?;

@@ -12,6 +12,7 @@ use secrets_protocol::{RunOutput, RunReply};
 use secrets_run::{CheckedDirectory, Launcher, SandboxError, SandboxRequest, run_in_sandbox};
 use tokio::sync::OwnedSemaphorePermit;
 
+use super::agent_calls::ConfirmedBy;
 use super::{SecretsService, ServiceError};
 use crate::util::caller_text::sanitized;
 use crate::util::reply_text::capped_text;
@@ -92,7 +93,9 @@ impl SecretsService {
             return Ok(RunStart::Refused(RunReply::Refused(UseOutcome::Unknown)));
         };
         let names: Vec<_> = template.environment.values().cloned().collect();
-        if let Some(outcome) = self.refusal_for_use(caller, &names, &target, now) {
+        if let Some(outcome) =
+            self.refusal_for_use(caller, &names, &target, now, ConfirmedBy::Portal)
+        {
             return Ok(RunStart::Refused(RunReply::Refused(outcome)));
         }
         if let Err(refusal) = template.check_arguments(arguments) {

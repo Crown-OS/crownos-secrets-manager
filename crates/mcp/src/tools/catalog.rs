@@ -4,7 +4,8 @@ use rmcp::model::Tool;
 use serde_json::{Map, Value, json};
 
 pub(crate) const INSTRUCTIONS: &str = "Uses the user's stored passwords, API keys and tokens by \
-name. No tool returns a secret value, and none can: you name a secret and CrownOS uses it for \
+name. To type a secret into a field, use computer-use's type_secret or fill_login, which bind to a \
+real element. No tool returns a secret value, and none can: you name a secret and CrownOS uses it for \
 you. Call secrets_list to see the names and where each may be used. If a secret you need is \
 missing, call secrets_request and ask the user to add it with `crownos-secrets add <name>`; never \
 ask the user to paste a secret into the chat.";
@@ -51,35 +52,6 @@ pub(crate) fn tools() -> Vec<Tool> {
                     "purpose": { "type": "string" }
                 },
                 "required": ["name", "kind", "purpose"]
-            }),
-        ),
-        tool(
-            "secrets_type",
-            "Types a secret into the focused field of a window, after the user confirms on screen. Prefer computer-use's type_secret, which focuses the field for you. Never returns the value.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "window": { "type": "string", "description": "The window identifier." },
-                    "app_id": { "type": "string" },
-                    "origin": { "type": "string", "description": "The page origin in a browser, such as https://github.com." }
-                },
-                "required": ["name", "window", "app_id"]
-            }),
-        ),
-        tool(
-            "secrets_fill_login",
-            "Types a stored user name, Tab, and a stored password into a login form whose user name field has focus, after one confirmation on screen. Never returns the values.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "username_secret": { "type": "string" },
-                    "password_secret": { "type": "string" },
-                    "window": { "type": "string" },
-                    "app_id": { "type": "string" },
-                    "origin": { "type": "string" }
-                },
-                "required": ["username_secret", "password_secret", "window", "app_id"]
             }),
         ),
         tool(

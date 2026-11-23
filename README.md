@@ -80,10 +80,10 @@ The agent gets these tools:
 | `secrets_request` | Asks you to add a secret that the agent needs |
 | `secrets_run` | Runs a registered template in a sandbox with secrets in its environment (S3) |
 | `secrets_http_session` | Adds API keys to HTTPS requests through a local proxy (S2) |
-| `secrets_type` | Types a secret into a window (S4; now it answers "not available yet") |
-| `secrets_fill_login` | Fills a login form (S4; not available yet) |
 
-There is no `get` tool. Each tool description tells the model that no value comes back. The
+There is no `get` tool and no typing tool. To type a secret into a page, an agent uses the
+`type_secret` and `fill_login` tools of computer-use, which bind the request to a browser window.
+Each tool description tells the model that no value comes back. The
 tool names use `_`, not `.`, because some clients and model APIs do not accept a dot in a tool
 name.
 
@@ -113,7 +113,11 @@ Not all rules apply yet:
   dialog for 60 seconds, and while one dialog of an agent is open, its other uses are refused.
   Without a reachable portal, the use is refused with `NeedsConfirmation`. The request loop
   answers other callers while a dialog is open.
-- `targets` and `require_password_field` apply to typing only.
+- `targets` and `require_password_field` apply to typing only. When a binding has `Origin`
+  targets, the origin must match one of them and the app id must match an `AppId` target, if there
+  are any. A binding without targets allows no typing.
+- Typing does not use `confirm`. The compositor shows its dialog for each typing request, and a
+  `PerSession` answer from the portal dialog does not cover it.
 - `uses_per_minute` counts calls (`run`, `proxy_session` and the others), not the requests that
   go through one proxy session.
 
@@ -402,35 +406,30 @@ not find these:
   store a low-entropy secret (a short PIN, a dictionary word) for agent use: a few guesses find
   it. A very short value can also appear inside a label by chance.
 
-## Typing into windows (S4a)
+## Typing into windows
 
 `type_into` and `fill_login` type a secret into the focused field of a window. The caller gives a
 target: the window identifier, its app id, and for a browser tab the page origin. computer-use's
 `type_secret` and `fill_login` tools fill it from the element they focus; the origin is a hint
-that the compositor checks again.
+that the compositor shows in its dialog.
 
-1. The daemon checks the binding as for any use, then its `targets`: an `AppId` pattern must
-   match the app id, or an `Origin` pattern the origin. A refusal comes before any dialog
-   (`Denied`, or `OriginMismatch` for a wrong origin).
-2. The confirmation dialog runs when `confirm` asks for it.
-3. The daemon sends `type_secret` on `crownos_secret_input_v1` with the value in a sealed memfd.
-   `fill_login` sends the user name with Tab after it, then the password into a password field.
-   A secret with `require_password_field` goes only into a password field.
-4. The compositor shows its own confirmation, checks the focus and the field, types, and answers
-   `typed`, `focus_changed`, `not_password_field`, `refused` or `cancelled`. The reply maps them
-   to `Done`, `FocusChanged`, `NotPasswordField`, `Denied` and `Cancelled`.
+1. The daemon checks the binding as for any use, then its `targets` (see the rules). A refusal
+   comes before the compositor sees the request (`Denied`, or `OriginMismatch` for a wrong
+   origin). A value longer than 4096 bytes is refused.
+2. The daemon makes one `crownos_secret_input_request_v1` for the request on
+   `crownos_secret_input_manager_v1`. It adds each value in a sealed memfd: for `fill_login` the
+   user name with Tab after it, then the password. A `Password`, `ApiKey` or `Token` secret, or a
+   binding with `require_password_field`, asks for a password field.
+3. The compositor shows its own Allow/Deny dialog that names the agent, the secrets, the window
+   and the origin. This dialog is the only confirmation for typing. After Allow it checks the
+   focus and the field, types, and sends `done` with `typed`, `focus_changed`,
+   `not_password_field`, `refused`, `cancelled`, `unknown_window`, `timed_out`,
+   `target_mismatch` or `session_locked`.
 
 The daemon connects to Wayland when it starts, before it turns dumpable off, so the compositor can
-identify it. Without a compositor at that time, or while the compositor does not offer the
-global (crownpositor gets it in S4b), typing answers `UNAVAILABLE`; restart the daemon after the
-compositor runs.
-
-## Plan
-
-- **S4b: the compositor side.** crownpositor implements `crownos_secret_input_v1` as its
-  description says: a confirmation it draws itself, immune to synthetic input; focus and
-  password-purpose checks; no terminals; the window sensitive from before the first key to 30 s
-  after; the value zeroed after use. It also checks the origin again through computer-use.
+identify it. Without a compositor at that time, or when the compositor does not offer the global,
+typing answers `UNAVAILABLE`. When the daemon loses the Wayland connection, it stops with exit
+code 75 and systemd starts it again.
 
 ## Development
 

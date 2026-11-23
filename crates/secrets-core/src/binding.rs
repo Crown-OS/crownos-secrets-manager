@@ -112,13 +112,36 @@ impl Binding {
     }
 
     /// Whether a window with `app_id`, showing a page from `origin`, is a permitted target.
+    /// Both kinds of target must agree: with an `AppId` target, the app id must match one; with
+    /// an `Origin` target, the origin must be given and match one. No target allows nothing.
     pub fn allows_target(&self, app_id: &str, origin: Option<&str>) -> bool {
-        self.targets.iter().any(|target| match target {
-            Target::AppId(pattern) => wildcard_matches(pattern, app_id),
-            Target::Origin(pattern) => {
-                origin.is_some_and(|origin| wildcard_matches(pattern, origin))
-            }
-        })
+        let app_ids: Vec<&str> = self
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                Target::AppId(pattern) => Some(pattern.as_str()),
+                Target::Origin(_) => None,
+            })
+            .collect();
+        let origins: Vec<&str> = self
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                Target::Origin(pattern) => Some(pattern.as_str()),
+                Target::AppId(_) => None,
+            })
+            .collect();
+        let app_matches = app_ids.is_empty()
+            || app_ids
+                .iter()
+                .any(|pattern| wildcard_matches(pattern, app_id));
+        let origin_matches = origins.is_empty()
+            || origin.is_some_and(|origin| {
+                origins
+                    .iter()
+                    .any(|pattern| wildcard_matches(pattern, origin))
+            });
+        !self.targets.is_empty() && app_matches && origin_matches
     }
 
     pub fn confirm_or(&self, default_confirm: Confirm) -> Confirm {
@@ -150,10 +173,22 @@ mod tests {
             Target::AppId("org.mozilla.*".into()),
             Target::Origin("https://*.github.com".into()),
         ]);
-        assert!(binding.allows_target("org.mozilla.firefox", None));
-        assert!(binding.allows_target("chromium", Some("https://api.github.com")));
-        assert!(!binding.allows_target("chromium", Some("https://github.com.evil.example")));
-        assert!(!binding.allows_target("chromium", None));
+        assert!(binding.allows_target("org.mozilla.firefox", Some("https://api.github.com")));
+        assert!(
+            !binding.allows_target("org.mozilla.firefox", None),
+            "an origin target needs an origin"
+        );
+        assert!(
+            !binding.allows_target("chromium", Some("https://api.github.com")),
+            "app ids AND origins"
+        );
+        assert!(!binding.allows_target(
+            "org.mozilla.firefox",
+            Some("https://github.com.evil.example")
+        ));
+        let app_only = binding_with_targets(vec![Target::AppId("org.mozilla.*".into())]);
+        assert!(app_only.allows_target("org.mozilla.firefox", None));
+        assert!(!app_only.allows_target("chromium", None));
     }
 
     #[test]

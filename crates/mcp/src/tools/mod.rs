@@ -11,15 +11,12 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use secrets_core::SecretKind;
-use secrets_protocol::{TypingTarget, secrets};
+use secrets_protocol::secrets;
 use serde_json::{Map, Value, json};
 
-use self::arguments::{
-    FillLoginArguments, HttpSessionArguments, RequestArguments, RunArguments, TypeArguments, parse,
-};
+use self::arguments::{HttpSessionArguments, RequestArguments, RunArguments, parse};
 use self::results::{
     daemon_failure, failure, proxy_result, run_result, secret_name, template_name, untrusted,
-    use_result,
 };
 use crate::bridge::Bridge;
 
@@ -82,50 +79,6 @@ impl Bridge {
                     "request": id.0,
                     "next_step": format!("Ask the user to run `crownos-secrets add {name} --kind {kind}` in a terminal, then `crownos-secrets bind {name} --agent <path>`."),
                 }))
-            }
-            "secrets_type" => {
-                let TypeArguments {
-                    name,
-                    window,
-                    app_id,
-                    origin,
-                } = parse(arguments)?;
-                let arguments = secrets::type_into {
-                    name: secret_name(name)?,
-                    target: TypingTarget {
-                        window,
-                        app_id,
-                        origin,
-                    },
-                };
-                use_result(
-                    self.call::<secrets::type_into>(&arguments)
-                        .await
-                        .map_err(daemon_failure)?,
-                )
-            }
-            "secrets_fill_login" => {
-                let FillLoginArguments {
-                    username_secret,
-                    password_secret,
-                    window,
-                    app_id,
-                    origin,
-                } = parse(arguments)?;
-                let arguments = secrets::fill_login {
-                    username: secret_name(username_secret)?,
-                    password: secret_name(password_secret)?,
-                    target: TypingTarget {
-                        window,
-                        app_id,
-                        origin,
-                    },
-                };
-                use_result(
-                    self.call::<secrets::fill_login>(&arguments)
-                        .await
-                        .map_err(daemon_failure)?,
-                )
             }
             "secrets_run" => {
                 let RunArguments {

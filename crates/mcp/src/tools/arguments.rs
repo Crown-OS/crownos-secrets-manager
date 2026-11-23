@@ -12,25 +12,6 @@ pub(crate) struct RequestArguments {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct TypeArguments {
-    pub(crate) name: String,
-    pub(crate) window: String,
-    pub(crate) app_id: String,
-    #[serde(default)]
-    pub(crate) origin: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct FillLoginArguments {
-    pub(crate) username_secret: String,
-    pub(crate) password_secret: String,
-    pub(crate) window: String,
-    pub(crate) app_id: String,
-    #[serde(default)]
-    pub(crate) origin: Option<String>,
-}
-
-#[derive(Deserialize)]
 pub(crate) struct RunArguments {
     pub(crate) template: String,
     #[serde(default)]

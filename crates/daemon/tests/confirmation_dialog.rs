@@ -238,3 +238,20 @@ fn one_open_dialog_per_agent_and_the_daemon_keeps_answering() {
     assert!(matches!(first, ProxySessionReply::Started(_)), "{first:?}");
     assert_eq!(asker.asked().len(), 1);
 }
+
+#[test]
+fn a_peer_that_leaves_during_the_dialog_gets_nothing_and_the_next_peer_is_asked_again() {
+    let asker = Arc::new(ScriptedAsker::default());
+    let (directory, mut client) = daemon_with_secret(Confirm::EveryUse, &asker);
+    asker.answer(Verdict::Granted, Duration::from_millis(500));
+    let _pending = client.proxy_session(vec![name("api")], 5).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    drop(client);
+    std::thread::sleep(Duration::from_millis(800));
+
+    let mut next = Client::connect_in(&directory.path().join("runtime")).unwrap();
+    asker.answer(Verdict::Granted, Duration::ZERO);
+    let reply = session(&mut next);
+    assert!(matches!(reply, ProxySessionReply::Started(_)), "{reply:?}");
+    assert_eq!(asker.asked().len(), 2, "the gone peer's answer was used again");
+}

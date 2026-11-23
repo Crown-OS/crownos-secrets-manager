@@ -1,6 +1,7 @@
 //! Typing through the compositor (`crownos_secret_input_v1`). The daemon connects to Wayland at
 //! start, before it turns dumpable off, so the compositor can read who it is. One worker thread
-//! owns the connection and sends one request at a time; each step waits for its `done` event.
+//! owns the connection and sends one request at a time, then waits for its `done` event. When the
+//! connection breaks, the daemon exits so that systemd starts it again with a new connection.
 
 mod value_fd;
 mod worker;
@@ -11,29 +12,44 @@ use std::sync::mpsc::{Sender, channel};
 use secrecy::SecretSlice;
 use tokio::sync::oneshot;
 
-/// One `type_secret` request.
-pub struct TypingStep {
-    pub value: SecretSlice<u8>,
-    pub window: String,
-    pub require_password_field: bool,
-    pub tab_after: bool,
-    pub confirmed: bool,
-    pub agent: String,
-    pub secret_name: String,
-    pub origin: String,
+/// The kind of a value, so the compositor can treat a password as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    Username,
+    Password,
 }
 
-impl std::fmt::Debug for TypingStep {
+/// One value of a request.
+pub struct TypingValue {
+    pub value: SecretSlice<u8>,
+    pub kind: ValueKind,
+    pub tab_after: bool,
+}
+
+impl std::fmt::Debug for TypingValue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("TypingStep")
-            .field("window", &self.window)
-            .field("secret_name", &self.secret_name)
+            .debug_struct("TypingValue")
+            .field("kind", &self.kind)
+            .field("tab_after", &self.tab_after)
             .finish_non_exhaustive()
     }
 }
 
-/// What the compositor answered for the last step that ran.
+/// One `crownos_secret_input_request_v1`: the compositor asks the user once for all values.
+#[derive(Debug)]
+pub struct TypingRequest {
+    pub window: String,
+    pub app_id: String,
+    pub require_password_field: bool,
+    /// Display text for the compositor's dialog.
+    pub agent: String,
+    pub secret_names: String,
+    pub origin: String,
+    pub values: Vec<TypingValue>,
+}
+
+/// What the compositor answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypingResult {
     Typed,
@@ -41,12 +57,14 @@ pub enum TypingResult {
     NotPasswordField,
     Refused,
     Cancelled,
-    /// The connection to the compositor broke.
-    Lost,
+    UnknownWindow,
+    TimedOut,
+    TargetMismatch,
+    SessionLocked,
 }
 
 pub(crate) struct TypingJob {
-    steps: Vec<TypingStep>,
+    request: TypingRequest,
     answer: oneshot::Sender<TypingResult>,
 }
 
@@ -108,11 +126,11 @@ impl CompositorTyping {
         self.jobs.is_some()
     }
 
-    /// Queues the steps; the answer comes when the last step that runs is done.
-    pub(crate) fn submit(&self, steps: Vec<TypingStep>) -> Option<oneshot::Receiver<TypingResult>> {
+    /// Queues the request; the answer comes with the compositor's `done`.
+    pub(crate) fn submit(&self, request: TypingRequest) -> Option<oneshot::Receiver<TypingResult>> {
         let jobs = self.jobs.as_ref()?;
         let (answer, receiver) = oneshot::channel();
-        jobs.send(TypingJob { steps, answer }).ok()?;
+        jobs.send(TypingJob { request, answer }).ok()?;
         Some(receiver)
     }
 }

@@ -3,8 +3,9 @@ use std::os::fd::AsFd as _;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use crownos_protocols::secret_input::v1::client::crownos_secret_input_manager_v1::{
-    self, CrownosSecretInputManagerV1, Flags, Outcome,
+use crownos_protocols::secret_input::v1::client::crownos_secret_input_manager_v1::CrownosSecretInputManagerV1;
+use crownos_protocols::secret_input::v1::client::crownos_secret_input_request_v1::{
+    self, CrownosSecretInputRequestV1, Kind, Outcome,
 };
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use secrecy::ExposeSecret as _;
@@ -13,10 +14,12 @@ use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 
 use super::value_fd::sealed_value;
-use super::{TypingJob, TypingResult, TypingStep};
+use super::{TypingJob, TypingRequest, TypingResult, ValueKind};
 
-/// The compositor's own confirmation and the typing must end within this time.
-const STEP_TIME: Duration = Duration::from_secs(150);
+/// The compositor answers within its own 120 s; this covers the typing after that.
+const REQUEST_TIME: Duration = Duration::from_secs(150);
+/// The exit code when the compositor connection breaks; systemd restarts the daemon.
+const LOST_CONNECTION_EXIT_CODE: i32 = 75;
 
 #[derive(Debug, Default)]
 struct WorkerState {
@@ -37,19 +40,31 @@ impl Dispatch<WlRegistry, GlobalListContents> for WorkerState {
 
 impl Dispatch<CrownosSecretInputManagerV1, ()> for WorkerState {
     fn event(
-        state: &mut Self,
+        _: &mut Self,
         _: &CrownosSecretInputManagerV1,
-        event: crownos_secret_input_manager_v1::Event,
+        _: <CrownosSecretInputManagerV1 as wayland_client::Proxy>::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let crownos_secret_input_manager_v1::Event::Done { id, outcome } = event {
+    }
+}
+
+impl Dispatch<CrownosSecretInputRequestV1, u32> for WorkerState {
+    fn event(
+        state: &mut Self,
+        _: &CrownosSecretInputRequestV1,
+        event: crownos_secret_input_request_v1::Event,
+        id: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let crownos_secret_input_request_v1::Event::Done { outcome } = event {
             let outcome = match outcome {
                 WEnum::Value(outcome) => outcome as u32,
                 WEnum::Unknown(value) => value,
             };
-            state.done.insert(id, outcome);
+            state.done.insert(*id, outcome);
         }
     }
 }
@@ -78,64 +93,74 @@ impl Worker {
 
     pub(super) fn run(mut self, jobs: &Receiver<TypingJob>) {
         while let Ok(job) = jobs.recv() {
-            let mut result = TypingResult::Typed;
-            for step in &job.steps {
-                result = self.type_one(step);
-                if result != TypingResult::Typed {
-                    break;
+            let result = self.type_request(&job.request);
+            drop(job.request);
+            match result {
+                Some(result) => {
+                    let _ = job.answer.send(result);
+                }
+                None => {
+                    tracing::error!(
+                        "the compositor connection broke; exiting so systemd restarts the daemon"
+                    );
+                    std::process::exit(LOST_CONNECTION_EXIT_CODE);
                 }
             }
-            drop(job.steps);
-            let _ = job.answer.send(result);
-            if result == TypingResult::Lost {
-                break;
-            }
         }
     }
 
-    fn type_one(&mut self, step: &TypingStep) -> TypingResult {
-        let Ok(value) = sealed_value(step.value.expose_secret()) else {
-            return TypingResult::Refused;
-        };
+    /// `None` when the connection broke.
+    fn type_request(&mut self, request: &TypingRequest) -> Option<TypingResult> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let mut flags = Flags::None;
-        if step.tab_after {
-            flags |= Flags::TabAfter;
-        }
-        if step.confirmed {
-            flags |= Flags::Confirmed;
-        }
-        self.manager.type_secret(
+        let proxy = self.manager.create_request(
+            request.window.clone(),
+            request.app_id.clone(),
+            u32::from(request.require_password_field),
+            request.agent.clone(),
+            request.secret_names.clone(),
+            request.origin.clone(),
+            &self.queue.handle(),
             id,
-            step.window.clone(),
-            u32::from(step.require_password_field),
-            flags,
-            step.agent.clone(),
-            step.secret_name.clone(),
-            step.origin.clone(),
-            value.as_fd(),
         );
-        drop(value);
-        match self.wait_for(id) {
-            Some(outcome) => result_of(outcome),
-            None => TypingResult::Lost,
+        for value in &request.values {
+            let Ok(descriptor) = sealed_value(value.value.expose_secret()) else {
+                proxy.destroy();
+                return Some(TypingResult::Refused);
+            };
+            let kind = match value.kind {
+                ValueKind::Username => Kind::Username,
+                ValueKind::Password => Kind::Password,
+            };
+            proxy.add_value(descriptor.as_fd(), kind, u32::from(value.tab_after));
+        }
+        proxy.commit();
+        let outcome = self.wait_for(id);
+        proxy.destroy();
+        let _ = self.queue.flush();
+        match outcome {
+            Waited::Done(outcome) => Some(result_of(outcome)),
+            Waited::TimedOut => Some(TypingResult::TimedOut),
+            Waited::Lost => None,
         }
     }
 
-    /// Reads events until `done(id)`; `None` when the connection broke or the time ran out.
-    fn wait_for(&mut self, id: u32) -> Option<u32> {
-        let deadline = Instant::now() + STEP_TIME;
+    fn wait_for(&mut self, id: u32) -> Waited {
+        let deadline = Instant::now() + REQUEST_TIME;
         loop {
-            self.queue.flush().ok()?;
-            self.queue.dispatch_pending(&mut self.state).ok()?;
+            if self.queue.flush().is_err() || self.queue.dispatch_pending(&mut self.state).is_err()
+            {
+                return Waited::Lost;
+            }
             if let Some(outcome) = self.state.done.remove(&id) {
-                return Some(outcome);
+                return Waited::Done(outcome);
             }
             let Some(guard) = self.queue.prepare_read() else {
                 continue;
             };
-            let left = deadline.checked_duration_since(Instant::now())?;
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return Waited::TimedOut;
+            };
             let timeout = Timespec {
                 tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
                 tv_nsec: i64::from(left.subsec_nanos()),
@@ -146,23 +171,37 @@ impl Worker {
                 poll(&mut descriptors, Some(&timeout))
             };
             match polled {
-                Ok(0) => return None,
+                Ok(0) => return Waited::TimedOut,
                 Ok(_) => {
-                    guard.read().ok()?;
+                    if guard.read().is_err() {
+                        return Waited::Lost;
+                    }
                 }
                 Err(rustix::io::Errno::INTR) => {}
-                Err(_) => return None,
+                Err(_) => return Waited::Lost,
             }
         }
     }
 }
 
-const fn result_of(outcome: u32) -> TypingResult {
-    match outcome {
-        value if value == Outcome::Typed as u32 => TypingResult::Typed,
-        value if value == Outcome::FocusChanged as u32 => TypingResult::FocusChanged,
-        value if value == Outcome::NotPasswordField as u32 => TypingResult::NotPasswordField,
-        value if value == Outcome::Cancelled as u32 => TypingResult::Cancelled,
-        _ => TypingResult::Refused,
-    }
+enum Waited {
+    Done(u32),
+    TimedOut,
+    Lost,
+}
+
+fn result_of(outcome: u32) -> TypingResult {
+    [
+        (Outcome::Typed, TypingResult::Typed),
+        (Outcome::FocusChanged, TypingResult::FocusChanged),
+        (Outcome::NotPasswordField, TypingResult::NotPasswordField),
+        (Outcome::Cancelled, TypingResult::Cancelled),
+        (Outcome::UnknownWindow, TypingResult::UnknownWindow),
+        (Outcome::TimedOut, TypingResult::TimedOut),
+        (Outcome::TargetMismatch, TypingResult::TargetMismatch),
+        (Outcome::SessionLocked, TypingResult::SessionLocked),
+    ]
+    .into_iter()
+    .find(|(known, _)| *known as u32 == outcome)
+    .map_or(TypingResult::Refused, |(_, result)| result)
 }

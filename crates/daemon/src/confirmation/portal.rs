@@ -15,6 +15,7 @@ const BACKENDS: [&str; 2] = [
 ];
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const INTERFACE: &str = "org.freedesktop.impl.portal.Access";
+const REQUEST_INTERFACE: &str = "org.freedesktop.impl.portal.Request";
 const SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.ServiceUnknown";
 const GRANTED: u32 = 0;
 
@@ -24,10 +25,10 @@ pub struct PortalAsker;
 impl ConfirmationAsker for PortalAsker {
     fn ask(&self, request: DialogRequest) -> VerdictFuture {
         Box::pin(async move {
-            match tokio::time::timeout(ANSWER_TIME, ask_portal(&request)).await {
-                Ok(Ok(true)) => Verdict::Granted,
-                Ok(Ok(false)) | Err(_) => Verdict::Denied,
-                Ok(Err(error)) => {
+            match ask_portal(&request).await {
+                Ok(true) => Verdict::Granted,
+                Ok(false) => Verdict::Denied,
+                Err(error) => {
                     tracing::warn!(%error, "no portal can ask the user");
                     Verdict::Unreachable
                 }
@@ -52,23 +53,26 @@ async fn ask_portal(request: &DialogRequest) -> Result<bool, String> {
     options.insert("deny_label", "Deny".into());
     options.insert("crownos-level", "dangerous".into());
     for backend in BACKENDS {
-        let reply = connection
-            .call_method(
-                Some(backend),
-                PATH,
-                Some(INTERFACE),
-                "AccessDialog",
-                &(
-                    &handle,
-                    request.app_key.as_str(),
-                    "",
-                    title.as_str(),
-                    "",
-                    body.as_str(),
-                    &options,
-                ),
-            )
-            .await;
+        let arguments = (
+            &handle,
+            request.app_key.as_str(),
+            "",
+            title.as_str(),
+            "",
+            body.as_str(),
+            &options,
+        );
+        let call = connection.call_method(
+            Some(backend),
+            PATH,
+            Some(INTERFACE),
+            "AccessDialog",
+            &arguments,
+        );
+        let Ok(reply) = tokio::time::timeout(ANSWER_TIME, call).await else {
+            close_request(&connection, backend, &handle).await;
+            return Ok(false);
+        };
         match reply {
             Ok(reply) => {
                 let (response, _results): (u32, HashMap<String, OwnedValue>) = reply
@@ -82,4 +86,14 @@ async fn ask_portal(request: &DialogRequest) -> Result<bool, String> {
         }
     }
     Err("no portal backend offers an access dialog".to_owned())
+}
+
+/// Closes the dialog of a request that nobody answered in time.
+async fn close_request(connection: &Connection, backend: &str, handle: &ObjectPath<'_>) {
+    let closed = connection
+        .call_method(Some(backend), handle, Some(REQUEST_INTERFACE), "Close", &())
+        .await;
+    if let Err(error) = closed {
+        tracing::debug!(%error, "cannot close an unanswered portal request");
+    }
 }

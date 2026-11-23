@@ -21,4 +21,12 @@ pub enum UseOutcome {
     FocusChanged,
     /// The user or the compositor stopped the typing.
     Cancelled,
+    /// The compositor knows no window with this identifier.
+    UnknownWindow,
+    /// Nobody answered the compositor's confirmation in time.
+    TimedOut,
+    /// The window's app id is not the one the caller named.
+    TargetMismatch,
+    /// The session is locked.
+    SessionLocked,
 }

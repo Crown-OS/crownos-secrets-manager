@@ -49,6 +49,10 @@ pub(crate) fn use_result(outcome: UseOutcome) -> CallToolResult {
         UseOutcome::Unknown => "no stored secret or template has this name; see secrets_list",
         UseOutcome::FocusChanged => "stopped: the focus left the window before typing",
         UseOutcome::Cancelled => "stopped: the user or the compositor cancelled the typing",
+        UseOutcome::UnknownWindow => "refused: no window has this identifier",
+        UseOutcome::TimedOut => "stopped: nobody answered the confirmation in time",
+        UseOutcome::TargetMismatch => "refused: the window is not the app you named",
+        UseOutcome::SessionLocked => "refused: the session is locked",
         UseOutcome::NeedsConfirmation => {
             "refused: this secret needs a confirmation on screen, which is not available yet; the user can allow uses without one with `crownos-secrets bind <name> --confirm never`"
         }
