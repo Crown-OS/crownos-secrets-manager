@@ -119,13 +119,19 @@ mod tests {
 
     #[test]
     fn an_installed_path_must_be_root_owned() {
-        let own = std::env::current_exe().unwrap_or_default();
+        let directory = std::env::temp_dir().join(format!("policy-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).ok();
+        let program = directory.join("crownos-secrets");
+        std::fs::write(&program, b"").ok();
+        let writable_by_others = std::os::unix::fs::PermissionsExt::from_mode(0o777);
+        std::fs::set_permissions(&program, writable_by_others).ok();
         let policy = ProgramPolicy {
             trusted: vec![TrustedProgram {
-                path: own.clone(),
+                path: program.clone(),
                 must_be_root_owned: true,
             }],
         };
-        assert!(!policy.allows(&Caller::from_executable(&own)));
+        assert!(!policy.allows(&Caller::from_executable(&program)));
+        std::fs::remove_dir_all(&directory).ok();
     }
 }
